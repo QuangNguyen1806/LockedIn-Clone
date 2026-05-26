@@ -1,0 +1,4 @@
+services/api/storage/
+services/api/.venv/
+storage/
+.env

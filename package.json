@@ -1,0 +1,24 @@
+{
+  "name": "lockedin-copilot",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev:web": "npm run dev --workspace=@lockedin/web",
+    "dev:desktop": "npm run tauri dev --workspace=@lockedin/desktop",
+    "dev:api": "cd services/api && .venv/bin/python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000",
+    "dev:worker": "cd services/worker && ../api/.venv/bin/python -m worker.main",
+    "build:shared": "npm run build --workspace=@lockedin/shared",
+    "build:web": "npm run build --workspace=@lockedin/web",
+    "build:desktop": "npm run build --workspace=@lockedin/desktop",
+    "install:mac": "bash scripts/install-macos-app.sh",
+    "docker:up": "docker compose -f infra/docker/docker-compose.yml up -d",
+    "docker:down": "docker compose -f infra/docker/docker-compose.yml down"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
