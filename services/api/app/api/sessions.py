@@ -36,7 +36,7 @@ def session_config(session: Session) -> SessionConfigSchema:
     )
 
 
-def session_to_response(session: Session) -> SessionResponse:
+def session_to_response(session: Session, question_count: int = 0) -> SessionResponse:
     return SessionResponse(
         id=session.id,
         userId=session.user_id,
@@ -48,6 +48,7 @@ def session_to_response(session: Session) -> SessionResponse:
         endedAt=session.ended_at,
         createdAt=session.created_at,
         updatedAt=session.updated_at,
+        questionCount=question_count,
     )
 
 
@@ -67,7 +68,20 @@ async def list_sessions(user: User = Depends(get_current_user), db: AsyncSession
     result = await db.execute(
         select(Session).where(Session.user_id == user.id).order_by(Session.created_at.desc())
     )
-    return [session_to_response(s) for s in result.scalars().all()]
+    sessions = result.scalars().all()
+    session_ids = [session.id for session in sessions]
+    counts: dict[str, int] = {}
+    if session_ids:
+        count_rows = await db.execute(
+            select(AiOutput.session_id, func.count())
+            .where(
+                AiOutput.session_id.in_(session_ids),
+                AiOutput.kind.in_(["suggestion", "critique"]),
+            )
+            .group_by(AiOutput.session_id)
+        )
+        counts = {row[0]: int(row[1]) for row in count_rows.all()}
+    return [session_to_response(session, counts.get(session.id, 0)) for session in sessions]
 
 
 @router.post("", response_model=SessionResponse)
@@ -198,7 +212,10 @@ async def get_session(
         )
 
     return SessionDetailResponse(
-        **session_to_response(session).model_dump(),
+        **session_to_response(
+            session,
+            sum(1 for output in session.ai_outputs if output.kind in ("suggestion", "critique")),
+        ).model_dump(),
         transcript=[
             TranscriptSegmentResponse(
                 id=t.id,
@@ -289,13 +306,14 @@ async def end_session(
         raise HTTPException(status_code=404, detail="Session not found")
     session.status = SessionStatus.completed.value
     session.ended_at = datetime.now(timezone.utc)
+    await enqueue_summarize(db, session.id)
+    await db.commit()
     if user.delete_data_on_session_end:
         for segment in list(session.transcript_segments):
             await db.delete(segment)
         for output in list(session.ai_outputs):
             await db.delete(output)
-    await enqueue_summarize(db, session.id)
-    await db.commit()
+        await db.commit()
     await db.refresh(session)
     return session_to_response(session)
 

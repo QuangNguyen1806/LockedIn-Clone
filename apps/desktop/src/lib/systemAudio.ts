@@ -115,3 +115,16 @@ export function formatSystemAudioError(err: unknown): string {
 export function isMacOsTauri(): boolean {
   return navigator.userAgent.includes("Macintosh") && "__TAURI_INTERNALS__" in window;
 }
+
+export function isTauriDesktop(): boolean {
+  return "__TAURI_INTERNALS__" in window;
+}
+
+export function isSystemAudioSupported(): boolean {
+  return typeof navigator.mediaDevices?.getDisplayMedia === "function";
+}
+
+export function defaultAudioInputMode(): "mic" | "system" {
+  if (isMacOsTauri()) return "mic";
+  return isSystemAudioSupported() ? "system" : "mic";
+}

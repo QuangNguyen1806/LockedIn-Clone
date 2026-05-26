@@ -7,6 +7,7 @@
     "apps/*"
   ],
   "scripts": {
+    "dev": "bash scripts/ensure-dev-env.sh && concurrently -k -n api,worker,desktop -c blue,yellow,magenta \"npm run dev:api\" \"npm run dev:worker\" \"npm run dev:desktop\"",
     "dev:web": "npm run dev --workspace=@lockedin/web",
     "dev:desktop": "npm run tauri dev --workspace=@lockedin/desktop",
     "dev:api": "cd services/api && .venv/bin/python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000",
@@ -20,5 +21,8 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
   }
 }

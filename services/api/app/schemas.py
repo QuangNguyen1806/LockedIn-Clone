@@ -72,6 +72,7 @@ class SessionResponse(BaseModel):
     endedAt: datetime | None = None
     createdAt: datetime
     updatedAt: datetime
+    questionCount: int = 0
 
 
 class TranscriptSegmentResponse(BaseModel):

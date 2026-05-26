@@ -1,13 +1,17 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, LogicalPosition, Manager, WebviewWindow};
+use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewWindow};
 use tauri_plugin_store::StoreExt;
 
 static CLICK_THROUGH_ENABLED: AtomicBool = AtomicBool::new(false);
 
 const STORE_PATH: &str = "overlay-settings.json";
 const OVERLAY_LABEL: &str = "overlay";
+const MIN_WIDTH: f64 = 440.0;
+const MIN_HEIGHT: f64 = 180.0;
+const MAX_WIDTH: f64 = 520.0;
+const MAX_HEIGHT: f64 = 280.0;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OverlayBounds {
@@ -24,6 +28,20 @@ pub struct OverlaySettings {
     pub corner: String,
     pub opacity: f64,
     pub visual_profile: String,
+    #[serde(default)]
+    pub click_through: bool,
+    #[serde(default = "default_width")]
+    pub width: f64,
+    #[serde(default = "default_height")]
+    pub height: f64,
+}
+
+fn default_width() -> f64 {
+    440.0
+}
+
+fn default_height() -> f64 {
+    240.0
 }
 
 impl Default for OverlaySettings {
@@ -34,6 +52,9 @@ impl Default for OverlaySettings {
             corner: "top-right".to_string(),
             opacity: 0.45,
             visual_profile: "discrete".to_string(),
+            click_through: false,
+            width: default_width(),
+            height: default_height(),
         }
     }
 }
@@ -61,6 +82,15 @@ fn save_settings(app: &AppHandle, settings: &OverlaySettings) -> Result<(), Stri
     store.save().map_err(|e| e.to_string())
 }
 
+fn apply_overlay_size(window: &WebviewWindow, settings: &OverlaySettings) -> Result<(), String> {
+    let width = settings.width.clamp(MIN_WIDTH, MAX_WIDTH);
+    let height = settings.height.clamp(MIN_HEIGHT, MAX_HEIGHT);
+    window
+        .set_size(LogicalSize::new(width, height))
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn apply_overlay_position(window: &WebviewWindow, settings: &OverlaySettings) -> Result<(), String> {
     window
         .set_position(LogicalPosition::new(settings.x, settings.y))
@@ -71,20 +101,65 @@ pub fn configure_overlay(window: &WebviewWindow) -> Result<(), String> {
     window.set_always_on_top(true).map_err(|e| e.to_string())?;
     window.set_decorations(false).map_err(|e| e.to_string())?;
     window.set_skip_taskbar(true).map_err(|e| e.to_string())?;
+    window
+        .set_min_size(Some(LogicalSize::new(MIN_WIDTH, MIN_HEIGHT)))
+        .map_err(|e| e.to_string())?;
+    window
+        .set_max_size(Some(LogicalSize::new(MAX_WIDTH, MAX_HEIGHT)))
+        .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn nearest_corner_for_bounds(
+    window: &WebviewWindow,
+    bounds: &OverlayBounds,
+) -> Result<String, String> {
+    let monitor = window
+        .current_monitor()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "monitor not found".to_string())?;
+    let scale = window.scale_factor().map_err(|e| e.to_string())?;
+    let screen = monitor.size().to_logical::<f64>(scale);
+    let pos = monitor.position().to_logical::<f64>(scale);
+
+    let cx = bounds.x + bounds.width / 2.0;
+    let cy = bounds.y + bounds.height / 2.0;
+    let mid_x = pos.x + screen.width / 2.0;
+    let mid_y = pos.y + screen.height / 2.0;
+
+    let left = cx < mid_x;
+    let top = cy < mid_y;
+
+    Ok(match (top, left) {
+        (true, true) => "top-left".to_string(),
+        (true, false) => "top-right".to_string(),
+        (false, true) => "bottom-left".to_string(),
+        (false, false) => "bottom-right".to_string(),
+    })
 }
 
 #[tauri::command]
 pub fn show_overlay(app: AppHandle) -> Result<(), String> {
     let window = overlay_window(&app)?;
-    let settings = load_settings(&app)?;
-    apply_overlay_position(&window, &settings)?;
+    let mut settings = load_settings(&app)?;
     configure_overlay(&window)?;
+    apply_overlay_size(&window, &settings)?;
+
+    if settings.corner.is_empty() {
+        apply_overlay_position(&window, &settings)?;
+    } else {
+        snap_overlay(app.clone(), settings.corner.clone())?;
+        settings = load_settings(&app)?;
+    }
+
+    apply_click_through(&app, &window, false)?;
     window.show().map_err(|e| e.to_string())?;
     window.set_focus().map_err(|e| e.to_string())?;
     app.emit("overlay-opacity-changed", settings.opacity)
         .map_err(|e| e.to_string())?;
     app.emit("overlay-profile-changed", settings.visual_profile)
+        .map_err(|e| e.to_string())?;
+    app.emit("click-through-changed", false)
         .map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -182,8 +257,31 @@ pub fn snap_overlay(app: AppHandle, corner: String) -> Result<(), String> {
     settings.x = x;
     settings.y = y;
     settings.corner = corner;
+    settings.width = size.width.clamp(MIN_WIDTH, MAX_WIDTH);
+    settings.height = size.height.clamp(MIN_HEIGHT, MAX_HEIGHT);
     save_settings(&app, &settings)?;
     Ok(())
+}
+
+#[tauri::command]
+pub fn snap_overlay_nearest(app: AppHandle) -> Result<(), String> {
+    let window = overlay_window(&app)?;
+    let pos = window
+        .outer_position()
+        .map_err(|e| e.to_string())?
+        .to_logical::<f64>(window.scale_factor().map_err(|e| e.to_string())?);
+    let size = window
+        .outer_size()
+        .map_err(|e| e.to_string())?
+        .to_logical::<f64>(window.scale_factor().map_err(|e| e.to_string())?);
+    let bounds = OverlayBounds {
+        x: pos.x,
+        y: pos.y,
+        width: size.width,
+        height: size.height,
+    };
+    let corner = nearest_corner_for_bounds(&window, &bounds)?;
+    snap_overlay(app, corner)
 }
 
 #[tauri::command]
@@ -240,6 +338,9 @@ pub fn apply_click_through(app: &AppHandle, window: &WebviewWindow, enabled: boo
         .set_ignore_cursor_events(enabled)
         .map_err(|e| e.to_string())?;
     CLICK_THROUGH_ENABLED.store(enabled, Ordering::SeqCst);
+    let mut settings = load_settings(app)?;
+    settings.click_through = enabled;
+    save_settings(app, &settings)?;
     app.emit("click-through-changed", enabled)
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -265,8 +366,15 @@ pub fn toggle_click_through(app: &AppHandle) -> Result<(), String> {
 pub fn restore_overlay_on_startup(app: &AppHandle) -> Result<(), String> {
     if let Ok(window) = overlay_window(app) {
         let settings = load_settings(app)?;
-        apply_overlay_position(&window, &settings)?;
         configure_overlay(&window)?;
+        apply_overlay_size(&window, &settings)?;
+        if !settings.corner.is_empty() {
+            let _ = snap_overlay(app.clone(), settings.corner.clone());
+        } else {
+            apply_overlay_position(&window, &settings)?;
+        }
+        let _settings = load_settings(app)?;
+        let _ = apply_click_through(app, &window, false);
     }
     Ok(())
 }

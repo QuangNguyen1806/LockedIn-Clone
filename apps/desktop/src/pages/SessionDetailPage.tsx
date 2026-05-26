@@ -1,21 +1,36 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../lib/api";
+import { startLiveCoach } from "../lib/startLiveCoach";
 
 type SessionDetail = {
   id: string;
   title: string;
   status: string;
-  transcript: Array<{ speaker: string; text: string }>;
+  config?: { mode?: string; company?: string; role?: string; tone?: string; customInstructions?: string };
+  transcript: Array<{ speaker: string; text: string; createdAt?: string }>;
   aiOutputs: Array<{ kind: string; content: string; createdAt: string }>;
   summary?: { summary: string; questions: string[]; feedbackBullets: string[] };
 };
+
+function pairQuestionsWithAnswers(session: SessionDetail) {
+  const questions = session.transcript.filter((line) => line.speaker === "interviewer");
+  const outputs = session.aiOutputs.filter(
+    (output) => output.kind === "suggestion" || output.kind === "critique",
+  );
+  return questions.map((question, index) => ({
+    question: question.text,
+    answer: outputs[index]?.content || "",
+    createdAt: question.createdAt || outputs[index]?.createdAt,
+  }));
+}
 
 export function SessionDetailPage() {
   const { id = "" } = useParams();
   const [session, setSession] = useState<SessionDetail | null>(null);
   const [error, setError] = useState("");
   const [polling, setPolling] = useState(false);
+  const [starting, setStarting] = useState(false);
 
   async function load() {
     const data = (await api.getSession(id)) as SessionDetail;
@@ -35,6 +50,8 @@ export function SessionDetailPage() {
     return () => clearInterval(timer);
   }, [polling, id]);
 
+  const qaPairs = useMemo(() => (session ? pairQuestionsWithAnswers(session) : []), [session]);
+
   if (!session) return <p className="muted">Loading session...</p>;
 
   const questionCount = session.transcript.filter((line) => line.speaker === "interviewer").length;
@@ -50,12 +67,37 @@ export function SessionDetailPage() {
     URL.revokeObjectURL(url);
   }
 
+  async function handleStartCoaching() {
+    if (!session) return;
+    setStarting(true);
+    setError("");
+    try {
+      await startLiveCoach({
+        sessionId: session.id,
+        title: session.title,
+        config: {
+          mode: session.config?.mode,
+          company: session.config?.company,
+          role: session.config?.role,
+          tone: session.config?.tone,
+          customInstructions: session.config?.customInstructions,
+        },
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not start coaching");
+    } finally {
+      setStarting(false);
+    }
+  }
+
   return (
     <div className="grid">
       <section className="card">
         <h2>{session.title}</h2>
         <p className="muted">
           Status: <span className="badge">{session.status}</span> · Questions detected: {questionCount}
+          {session.config?.company ? ` · ${session.config.company}` : ""}
+          {session.config?.role ? ` · ${session.config.role}` : ""}
         </p>
         <div className="controls">
           {session.status !== "completed" && (
@@ -63,6 +105,9 @@ export function SessionDetailPage() {
               End session & generate summary
             </button>
           )}
+          <button type="button" className="primary" disabled={starting} onClick={() => void handleStartCoaching()}>
+            {starting ? "Starting…" : "Start coaching"}
+          </button>
           <Link className="btn secondary" to={`/coach?session=${session.id}`}>
             Open in live coach
           </Link>
@@ -115,7 +160,21 @@ export function SessionDetailPage() {
         </section>
       )}
 
-      {session.aiOutputs.length > 0 && (
+      {qaPairs.length > 0 && (
+        <section className="card">
+          <h3>Questions & answers</h3>
+          {qaPairs.map((pair, idx) => (
+            <div key={idx} className="grid" style={{ marginBottom: "1rem" }}>
+              <p>
+                <strong>Q:</strong> {pair.question}
+              </p>
+              <pre>{pair.answer || "(no answer recorded)"}</pre>
+            </div>
+          ))}
+        </section>
+      )}
+
+      {session.aiOutputs.length > 0 && qaPairs.length === 0 && (
         <section className="card">
           <h3>AI outputs</h3>
           {session.aiOutputs.map((output, idx) => (

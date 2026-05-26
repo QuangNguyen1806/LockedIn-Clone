@@ -9,7 +9,8 @@ type Session = {
   createdAt: string;
   startedAt?: string;
   endedAt?: string;
-  config?: { mode?: string };
+  config?: { mode?: string; company?: string; role?: string };
+  questionCount?: number;
 };
 
 export function HistoryPage() {
@@ -24,6 +25,8 @@ export function HistoryPage() {
   });
   const [statusFilter, setStatusFilter] = useState("all");
   const [modeFilter, setModeFilter] = useState("all");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -39,9 +42,16 @@ export function HistoryPage() {
     return sessions.filter((session) => {
       if (statusFilter !== "all" && session.status !== statusFilter) return false;
       if (modeFilter !== "all" && session.config?.mode !== modeFilter) return false;
+      const created = new Date(session.createdAt).getTime();
+      if (dateFrom && created < new Date(dateFrom).getTime()) return false;
+      if (dateTo) {
+        const end = new Date(dateTo);
+        end.setHours(23, 59, 59, 999);
+        if (created > end.getTime()) return false;
+      }
       return true;
     });
-  }, [modeFilter, sessions, statusFilter]);
+  }, [dateFrom, dateTo, modeFilter, sessions, statusFilter]);
 
   function sessionDurationMinutes(session: Session) {
     if (!session.startedAt || !session.endedAt) return null;
@@ -110,18 +120,31 @@ export function HistoryPage() {
               <option value="meeting">Meeting</option>
             </select>
           </div>
+          <div>
+            <label htmlFor="dateFrom">From</label>
+            <input id="dateFrom" type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
+          </div>
+          <div>
+            <label htmlFor="dateTo">To</label>
+            <input id="dateTo" type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
+          </div>
         </div>
         <ul className="session-list">
           {filtered.map((session) => {
             const duration = sessionDurationMinutes(session);
+            const meta = [session.config?.company, session.config?.role].filter(Boolean).join(" · ");
             return (
               <li key={session.id}>
                 <Link to={`/history/${session.id}`}>{session.title}</Link>{" "}
                 <span className="badge">{session.status}</span>
                 {session.config?.mode && <span className="badge">{session.config.mode}</span>}
+                {(session.questionCount ?? 0) > 0 && (
+                  <span className="badge">{session.questionCount} Q&A</span>
+                )}
+                {duration !== null && <span className="badge">{duration} min</span>}
                 <div className="muted">
                   {new Date(session.createdAt).toLocaleString()}
-                  {duration !== null ? ` · ${duration} min` : ""}
+                  {meta ? ` · ${meta}` : ""}
                 </div>
               </li>
             );

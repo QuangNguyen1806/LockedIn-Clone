@@ -3,6 +3,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP_SRC="$ROOT/apps/desktop/src-tauri/target/release/bundle/macos/LockedIn Copilot.app"
 APP_DEST="/Applications/LockedIn Copilot.app"
+SUPPORT_DIR="$HOME/Library/Application Support/com.lockedin.copilot"
+
+echo "Ensuring Python environment..."
+bash "$ROOT/scripts/ensure-dev-env.sh"
 
 echo "Building LockedIn Copilot..."
 source "$HOME/.cargo/env" 2>/dev/null || true
@@ -15,6 +19,10 @@ if [ ! -d "$APP_SRC" ]; then
   exit 1
 fi
 
+echo "Registering project path for backend autostart..."
+mkdir -p "$SUPPORT_DIR"
+printf '%s\n' "$ROOT" > "$SUPPORT_DIR/repo-path.txt"
+
 echo "Installing to Applications..."
 rm -rf "$APP_DEST"
 cp -R "$APP_SRC" "/Applications/"
@@ -25,4 +33,4 @@ codesign --force --deep --sign - \
   "$APP_DEST"
 
 echo "Installed: $APP_DEST"
-echo "Open from Applications folder or Spotlight (Cmd+Space → LockedIn)."
+echo "Open from Applications — API and worker start automatically and stop when you quit."

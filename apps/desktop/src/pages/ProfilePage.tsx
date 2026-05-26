@@ -1,5 +1,7 @@
 import { FormEvent, useEffect, useState } from "react";
 import { api } from "../lib/api";
+import { getDefaultOverlayProfile, setDefaultOverlayProfile } from "../lib/overlayPreferences";
+import { VisualProfile } from "../stores/coachTypes";
 
 type Profile = {
   displayName: string;
@@ -21,8 +23,10 @@ export function ProfilePage() {
   const [skillsText, setSkillsText] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [defaultOverlayProfile, setDefaultOverlayProfileState] = useState<VisualProfile>("discrete");
 
   useEffect(() => {
+    setDefaultOverlayProfileState(getDefaultOverlayProfile());
     Promise.all([api.me(), api.listDocuments()])
       .then(([me, docs]) => {
         const p = me as Profile;
@@ -111,6 +115,21 @@ export function ProfilePage() {
             />
             Delete transcript data when a session ends
           </label>
+          <div>
+            <label htmlFor="defaultOverlayProfile">Default overlay profile for live coaching</label>
+            <select
+              id="defaultOverlayProfile"
+              value={defaultOverlayProfile}
+              onChange={(e) => {
+                const profile = e.target.value === "focused" ? "focused" : "discrete";
+                setDefaultOverlayProfileState(profile);
+                setDefaultOverlayProfile(profile);
+              }}
+            >
+              <option value="discrete">Discrete (semi-transparent, compact)</option>
+              <option value="focused">Focused (full opacity, more detail)</option>
+            </select>
+          </div>
           {message && <p className="muted">{message}</p>}
           {error && <p className="error">{error}</p>}
           <button type="submit" className="primary">

@@ -2,13 +2,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api, getStoredToken } from "../lib/api";
+import { startLiveCoach } from "../lib/startLiveCoach";
 import { useCoachState } from "../hooks/useCoachState";
 import { requestMicrophonePermission, PermissionState } from "../lib/permissions";
+import { defaultAudioInputMode } from "../lib/systemAudio";
 import { AudioInputMode } from "../stores/coachTypes";
 import {
   isSystemAudioSupported,
-  prepareCoachCapture,
-  startCoachSession,
+  retryCoachConnection,
   stopCoachSession,
 } from "../stores/sessionStore";
 
@@ -33,9 +34,7 @@ export function CoachPage() {
   const [searchParams] = useSearchParams();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [sessionId, setSessionId] = useState(searchParams.get("session") || "");
-  const [audioInput, setAudioInput] = useState<AudioInputMode>(
-    isSystemAudioSupported() ? "system" : "mic",
-  );
+  const [audioInput, setAudioInput] = useState<AudioInputMode>(defaultAudioInputMode());
   const [micPermission, setMicPermission] = useState<PermissionState>("unknown");
   const [permissionMessage, setPermissionMessage] = useState("");
   const [startError, setStartError] = useState("");
@@ -54,6 +53,18 @@ export function CoachPage() {
     const fromQuery = searchParams.get("session");
     if (fromQuery) setSessionId(fromQuery);
   }, [searchParams]);
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      const mod = event.metaKey || event.ctrlKey;
+      if (mod && event.shiftKey && event.code === "KeyD") {
+        event.preventDefault();
+        setShowDebug((value) => !value);
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   async function handleRequestMicrophone() {
     setPermissionMessage("");
@@ -81,13 +92,13 @@ export function CoachPage() {
       return;
     }
     try {
-      await prepareCoachCapture(nextAudioInput);
-      await invoke("show_overlay");
-      await startCoachSession({
+      await startLiveCoach({
         sessionId: selected.id,
-        sessionTitle: selected.title,
-        sessionMode: selected.config?.mode || "",
-        sessionCompany: selected.config?.company || "",
+        title: selected.title,
+        config: {
+          mode: selected.config?.mode,
+          company: selected.config?.company,
+        },
         audioInput: nextAudioInput,
       });
     } catch (err) {
@@ -104,11 +115,6 @@ export function CoachPage() {
 
   async function handleStop() {
     await stopCoachSession();
-    try {
-      await invoke("hide_overlay");
-    } catch {
-      // browser dev fallback
-    }
   }
 
   async function handleHide() {
@@ -172,6 +178,11 @@ export function CoachPage() {
           ) : (
             <button onClick={() => void handleStop()}>Stop coaching</button>
           )}
+          {(coach.fsmState === "error" || coach.errorRecoverable) && (
+            <button type="button" className="secondary" onClick={() => void retryCoachConnection()}>
+              Retry connection
+            </button>
+          )}
           <span className="badge">{coach.connectionState}</span>
           <span className="badge">{coach.fsmState}</span>
         </div>
@@ -209,10 +220,15 @@ export function CoachPage() {
         <div className="coach-header">
           <h3>Live status</h3>
           <button type="button" className="secondary" onClick={() => setShowDebug((v) => !v)}>
-            {showDebug ? "Hide debug" : "Show debug transcript"}
+            {showDebug ? "Hide debug" : "Show debug (⌘⇧D)"}
           </button>
         </div>
         <p className="hint">{listeningHint(coach.listeningMode, audioInput)}</p>
+        {coach.error && (
+          <p className={coach.errorRecoverable ? "hint" : "error"}>
+            {coach.errorRecoverable ? `Recoverable: ${coach.error}` : coach.error}
+          </p>
+        )}
         {coach.currentQuestion && (
           <p>
             <strong>Latest question:</strong> {coach.currentQuestion}
@@ -221,6 +237,36 @@ export function CoachPage() {
         {coach.queuedQuestion && <p className="hint">Next question detected — queued</p>}
         {showDebug && (
           <div className="grid">
+            <div className="grid grid-2">
+              <div>
+                <strong>FSM</strong>
+                <p>{coach.fsmState}</p>
+              </div>
+              <div>
+                <strong>Connection</strong>
+                <p>{coach.connectionState}</p>
+              </div>
+              <div>
+                <strong>Audio mode</strong>
+                <p>{coach.metrics.audioMode}</p>
+              </div>
+              <div>
+                <strong>Reconnects</strong>
+                <p>{coach.metrics.reconnectCount}</p>
+              </div>
+              <div>
+                <strong>Errors</strong>
+                <p>{coach.metrics.errorCount}</p>
+              </div>
+              <div>
+                <strong>STT latency</strong>
+                <p>{coach.metrics.lastSttLatencyMs ?? "—"} ms</p>
+              </div>
+              <div>
+                <strong>First token</strong>
+                <p>{coach.metrics.firstTokenLatencyMs ?? "—"} ms</p>
+              </div>
+            </div>
             {coach.transcriptHistory.length === 0 ? (
               <pre className="muted">No Q/A pairs yet.</pre>
             ) : (
@@ -237,7 +283,7 @@ export function CoachPage() {
         )}
       </section>
 
-      {(coach.error || startError) && <p className="error">{coach.error || startError}</p>}
+      {startError && <p className="error">{startError}</p>}
     </div>
   );
 }

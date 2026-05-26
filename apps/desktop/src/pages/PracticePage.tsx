@@ -1,13 +1,9 @@
-import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { api } from "../lib/api";
+import { startLiveCoach } from "../lib/startLiveCoach";
 import { useCoachState } from "../hooks/useCoachState";
-import {
-  isSystemAudioSupported,
-  prepareCoachCapture,
-  startCoachSession,
-  stopCoachSession,
-} from "../stores/sessionStore";
+import { stopCoachSession } from "../stores/sessionStore";
 
 type PracticeQuestion = {
   id: string;
@@ -17,10 +13,12 @@ type PracticeQuestion = {
 };
 
 export function PracticePage() {
+  const navigate = useNavigate();
   const [questions, setQuestions] = useState<PracticeQuestion[]>([]);
   const [selectedQuestion, setSelectedQuestion] = useState<PracticeQuestion | null>(null);
   const [sessionId, setSessionId] = useState("");
   const [error, setError] = useState("");
+  const [starting, setStarting] = useState(false);
   const coach = useCoachState();
   const active = coach.fsmState !== "idle" && coach.fsmState !== "ended";
 
@@ -37,8 +35,9 @@ export function PracticePage() {
       return;
     }
     setError("");
+    setStarting(true);
     try {
-      const session = (await api.createSession({
+      const id = await startLiveCoach({
         title: `Practice: ${selectedQuestion.topic}`,
         config: {
           mode: "behavioral",
@@ -46,33 +45,29 @@ export function PracticePage() {
           customInstructions: `Practice question: ${selectedQuestion.text}`,
         },
         strategy: "critique",
-      })) as { id: string };
-      setSessionId(session.id);
-      await prepareCoachCapture(isSystemAudioSupported() ? "mic" : "mic");
-      await invoke("show_overlay");
-      await startCoachSession({
-        sessionId: session.id,
-        sessionTitle: `Practice: ${selectedQuestion.topic}`,
-        sessionMode: "behavioral",
-        sessionStrategy: "critique",
+        practiceQuestion: selectedQuestion.text,
         audioInput: "mic",
+        visualProfile: "focused",
+        navigate: (path) => navigate(path),
       });
+      setSessionId(id);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not start practice session.");
-      try {
-        await invoke("hide_overlay");
-      } catch {
-        // ignore
-      }
+    } finally {
+      setStarting(false);
     }
   }
 
   async function stopPractice() {
+    const endedSessionId = sessionId || coach.sessionId;
     await stopCoachSession();
-    try {
-      await invoke("hide_overlay");
-    } catch {
-      // ignore
+    if (endedSessionId) {
+      try {
+        await api.endSession(endedSessionId);
+      } catch {
+        // summary may already be queued from WS stop
+      }
+      navigate(`/history/${endedSessionId}`);
     }
   }
 
@@ -114,13 +109,23 @@ export function PracticePage() {
         )}
         <div className="controls">
           {!active ? (
-            <button type="button" className="primary" disabled={!selectedQuestion} onClick={() => void startPractice()}>
-              Start practice
+            <button
+              type="button"
+              className="primary"
+              disabled={!selectedQuestion || starting}
+              onClick={() => void startPractice()}
+            >
+              {starting ? "Starting…" : "Start practice"}
             </button>
           ) : (
             <button type="button" onClick={() => void stopPractice()}>
               Stop practice
             </button>
+          )}
+          {sessionId && (
+            <Link className="btn secondary" to={`/history/${sessionId}`}>
+              View session
+            </Link>
           )}
           {sessionId && <span className="badge">{coach.fsmState}</span>}
         </div>

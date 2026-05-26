@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { api } from "../lib/api";
+import { startLiveCoach } from "../lib/startLiveCoach";
 
 type Preset = {
   id: string;
@@ -14,6 +15,7 @@ type Preset = {
 };
 
 export function PresetsPage() {
+  const navigate = useNavigate();
   const [presets, setPresets] = useState<Preset[]>([]);
   const [name, setName] = useState("");
   const [mode, setMode] = useState("behavioral");
@@ -22,6 +24,7 @@ export function PresetsPage() {
   const [role, setRole] = useState("");
   const [customInstructions, setCustomInstructions] = useState("");
   const [error, setError] = useState("");
+  const [startingId, setStartingId] = useState("");
 
   async function load() {
     const list = (await api.listPresets()) as Preset[];
@@ -52,6 +55,28 @@ export function PresetsPage() {
   async function removePreset(id: string) {
     await api.deletePreset(id);
     await load();
+  }
+
+  async function handleStartCoaching(preset: Preset) {
+    setError("");
+    setStartingId(preset.id);
+    try {
+      await startLiveCoach({
+        title: preset.name,
+        config: {
+          mode: preset.mode,
+          tone: preset.tone,
+          company: preset.company,
+          role: preset.role,
+          customInstructions: preset.customInstructions,
+        },
+        navigate: (path) => navigate(path),
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not start coaching");
+    } finally {
+      setStartingId("");
+    }
   }
 
   return (
@@ -117,8 +142,17 @@ export function PresetsPage() {
               <div className="muted">
                 {preset.mode} · {preset.tone}
                 {preset.company ? ` · ${preset.company}` : ""}
+                {preset.role ? ` · ${preset.role}` : ""}
               </div>
               <div className="controls">
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={startingId === preset.id}
+                  onClick={() => void handleStartCoaching(preset)}
+                >
+                  {startingId === preset.id ? "Starting…" : "Start coaching"}
+                </button>
                 <Link className="btn secondary" to={`/sessions/new?preset=${preset.id}`}>
                   New session
                 </Link>

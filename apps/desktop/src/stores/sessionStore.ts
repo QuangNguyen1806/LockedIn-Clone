@@ -1,9 +1,11 @@
+import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { buildWsUrl, getStoredToken, api } from "../lib/api";
 import { requestSystemAudioStream, formatSystemAudioError } from "../lib/systemAudio";
 import {
   AudioInputMode,
   CoachControlPayload,
+  CoachMetrics,
   CoachStateSnapshot,
   COACH_CONTROL_EVENT,
   COACH_STATE_EVENT,
@@ -44,31 +46,6 @@ const listeners = new Set<(state: CoachStateSnapshot) => void>();
 let controlUnlisten: (() => void) | null = null;
 let markQuestionUnlisten: (() => void) | null = null;
 
-async function ensureControlListeners() {
-  if (!controlUnlisten) {
-    const unlisten = await listen<CoachControlPayload>(COACH_CONTROL_EVENT, (event) => {
-      if (event.payload.action === "stop") {
-        void stopCoachSession();
-      }
-      if (event.payload.action === "retry") {
-        reconnectAttempts = 0;
-        void connect();
-      }
-      if (event.payload.action === "dismiss") {
-        void dismissOverlay();
-      }
-    });
-    controlUnlisten = unlisten;
-  }
-  if (!markQuestionUnlisten) {
-    markQuestionUnlisten = await listen("coach/mark-question", () => {
-      if (ws?.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "control", action: "mark_question" }));
-      }
-    });
-  }
-}
-
 let ws: WebSocket | null = null;
 let pingTimer: ReturnType<typeof setInterval> | null = null;
 let mediaRecorder: MediaRecorder | null = null;
@@ -86,6 +63,17 @@ let suggestionTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingSuggestion = "";
 let pendingSuggestionOutputId = "";
 let pendingSuggestionFinal = false;
+let questionReceivedAt: number | null = null;
+let firstPartialAt: number | null = null;
+let lastAudioSentAt: number | null = null;
+
+const defaultMetrics = (): CoachMetrics => ({
+  reconnectCount: 0,
+  errorCount: 0,
+  lastSttLatencyMs: null,
+  firstTokenLatencyMs: null,
+  audioMode: "system",
+});
 
 const state: CoachStateSnapshot = {
   fsmState: "idle",
@@ -94,6 +82,7 @@ const state: CoachStateSnapshot = {
   sessionMode: "",
   sessionCompany: "",
   sessionStrategy: "live_answer",
+  practiceQuestion: "",
   connectionState: "idle",
   listeningMode: "none",
   currentQuestion: "",
@@ -105,12 +94,18 @@ const state: CoachStateSnapshot = {
   thinking: false,
   transcriptHistory: [],
   error: null,
+  errorRecoverable: false,
   visualProfile: "discrete",
   opacity: 0.45,
+  metrics: defaultMetrics(),
 };
 
 function notify() {
-  const snapshot = { ...state, transcriptHistory: [...state.transcriptHistory] };
+  const snapshot = {
+    ...state,
+    transcriptHistory: [...state.transcriptHistory],
+    metrics: { ...state.metrics },
+  };
   listeners.forEach((listener) => listener(snapshot));
   void emit(COACH_STATE_EVENT, snapshot).catch(() => undefined);
 }
@@ -120,12 +115,25 @@ function setFsm(next: SessionFsmState) {
   notify();
 }
 
-function setError(message: string | null) {
+function setRecoverableError(message: string) {
   state.error = message;
-  if (message) {
-    state.fsmState = "error";
-    state.connectionState = "error";
-  }
+  state.errorRecoverable = true;
+  state.metrics.errorCount += 1;
+  notify();
+}
+
+function setFatalError(message: string) {
+  state.error = message;
+  state.errorRecoverable = false;
+  state.fsmState = "error";
+  state.connectionState = "error";
+  state.metrics.errorCount += 1;
+  notify();
+}
+
+function clearError() {
+  state.error = null;
+  state.errorRecoverable = false;
   notify();
 }
 
@@ -133,21 +141,49 @@ function getSpeechRecognition(): (new () => SpeechRecognitionLike) | null {
   return window.SpeechRecognition || window.webkitSpeechRecognition || null;
 }
 
+function pickRecorderMimeType(): string | null {
+  const candidates = [
+    "audio/webm;codecs=opus",
+    "audio/webm",
+    "audio/mp4",
+    "audio/aac",
+    "",
+  ];
+  for (const mimeType of candidates) {
+    if (!mimeType || MediaRecorder.isTypeSupported(mimeType)) {
+      return mimeType || null;
+    }
+  }
+  return null;
+}
+
 function attachMediaRecorder(target: MediaStream) {
-  const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
-    ? "audio/webm;codecs=opus"
-    : "audio/webm";
-  mediaRecorder = new MediaRecorder(target, { mimeType });
+  const mimeType = pickRecorderMimeType();
+  try {
+    mediaRecorder = mimeType
+      ? new MediaRecorder(target, { mimeType })
+      : new MediaRecorder(target);
+  } catch (err) {
+    throw new Error(
+      err instanceof Error
+        ? `Could not capture audio from microphone: ${err.message}`
+        : "Could not capture audio from microphone. Allow mic access in System Settings → Privacy & Security → Microphone, then restart the app.",
+    );
+  }
+  mediaRecorder.onerror = () => {
+    setRecoverableError("Microphone recording failed. Try stopping and starting again.");
+  };
   mediaRecorder.ondataavailable = (event) => {
     if (event.data.size > 0) {
       void sendAudioChunk(event.data);
     }
   };
-  mediaRecorder.start(2000);
+  mediaRecorder.start(400);
 }
 
 async function sendAudioChunk(blob: Blob) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  lastAudioSentAt = Date.now();
   const buffer = await blob.arrayBuffer();
   const bytes = new Uint8Array(buffer);
   let binary = "";
@@ -162,14 +198,14 @@ async function sendAudioChunk(blob: Blob) {
   );
 }
 
-function sendTranscript(text: string, isFinal: boolean) {
+function sendTranscript(text: string, isFinal: boolean, speaker: "interviewer" | "user" = "interviewer") {
   if (!ws || ws.readyState !== WebSocket.OPEN || !text.trim()) return;
   ws.send(
     JSON.stringify({
       type: "transcript",
       text: text.trim(),
       isFinal,
-      speaker: "interviewer",
+      speaker,
     }),
   );
 }
@@ -197,6 +233,8 @@ function flushSuggestion() {
         { question: state.currentQuestion, answer: pendingSuggestion },
       ];
     }
+  } else if (pendingSuggestion) {
+    state.fsmState = "answer_streaming";
   }
   notify();
 }
@@ -204,6 +242,12 @@ function flushSuggestion() {
 function queueSuggestionUpdate(content: string, outputId: string, isFinal: boolean) {
   if (outputId && state.suggestionOutputId && outputId !== state.suggestionOutputId && !isFinal) {
     return;
+  }
+  if (!firstPartialAt && content) {
+    firstPartialAt = Date.now();
+    if (questionReceivedAt) {
+      state.metrics.firstTokenLatencyMs = firstPartialAt - questionReceivedAt;
+    }
   }
   pendingSuggestion = content;
   pendingSuggestionOutputId = outputId;
@@ -231,12 +275,35 @@ function stopCaptureTracks() {
 }
 
 async function requestMicrophone() {
-  const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  if (!stream) stream = micStream;
-  return micStream;
+  try {
+    const micStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
+    if (!stream) stream = micStream;
+    return micStream;
+  } catch (err) {
+    const name = err instanceof DOMException ? err.name : "";
+    if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+      throw new Error(
+        "Microphone access denied. Open System Settings → Privacy & Security → Microphone, enable LockedIn Copilot, then restart the app.",
+      );
+    }
+    if (name === "NotFoundError") {
+      throw new Error("No microphone found. Connect a mic or choose a different audio source.");
+    }
+    throw new Error(
+      err instanceof Error
+        ? `Could not capture audio from microphone: ${err.message}`
+        : "Could not capture audio from microphone.",
+    );
+  }
 }
 
-async function startBrowserSpeech() {
+async function startBrowserSpeech(captureSpeaker: "interviewer" | "user") {
   const SpeechRecognitionCtor = getSpeechRecognition();
   if (!SpeechRecognitionCtor) return false;
   await requestMicrophone();
@@ -253,21 +320,26 @@ async function startBrowserSpeech() {
       if (result.isFinal) finalText += text;
       else interim += text;
     }
-    if (interim && state.visualProfile === "focused") {
+    if (interim && state.visualProfile === "focused" && captureSpeaker === "interviewer") {
       state.livePartial = interim;
-      sendTranscript(interim, false);
+      sendTranscript(interim, false, captureSpeaker);
       notify();
     }
     if (finalText.trim()) {
-      state.currentQuestion = finalText.trim();
-      state.livePartial = "";
-      sendTranscript(finalText.trim(), true);
+      if (captureSpeaker === "interviewer") {
+        state.currentQuestion = finalText.trim();
+        state.livePartial = "";
+        questionReceivedAt = Date.now();
+        setFsm("processing");
+        state.thinking = true;
+      }
+      sendTranscript(finalText.trim(), true, captureSpeaker);
       notify();
     }
   };
   rec.onerror = (event) => {
     if (event.error && event.error !== "no-speech") {
-      setError(`Speech recognition error: ${event.error}`);
+      setRecoverableError(`Speech recognition error: ${event.error}`);
     }
   };
   rec.onend = () => {
@@ -291,35 +363,45 @@ function attachSystemStream(target: MediaStream) {
 }
 
 async function startCaptureFromPrepared() {
-  if (audioInput === "system") {
-    if (!systemStream) {
-      setError("System audio was not prepared. Click Start coaching again.");
+  try {
+    if (audioInput === "system") {
+      if (!systemStream) {
+        setFatalError("System audio was not prepared. Click Start coaching again.");
+        return;
+      }
+      attachSystemStream(systemStream);
+      notify();
       return;
     }
-    attachSystemStream(systemStream);
-    return;
-  }
 
-  if (audioInput === "both") {
-    if (systemStream) {
-      attachSystemStream(systemStream);
+    if (audioInput === "both") {
+      if (systemStream) {
+        attachSystemStream(systemStream);
+      }
+      const browserStarted =
+        !("__TAURI_INTERNALS__" in window) && (await startBrowserSpeech("user"));
+      state.listeningMode = systemStream && browserStarted ? "both" : browserStarted ? "browser" : "system";
+      notify();
+      return;
     }
-    const browserStarted = await startBrowserSpeech();
-    state.listeningMode = systemStream && browserStarted ? "both" : browserStarted ? "browser" : "system";
-    notify();
-    return;
-  }
 
-  const browserStarted = await startBrowserSpeech();
-  if (!browserStarted) {
-    const micStream = stream || (await requestMicrophone());
-    if (!stream) stream = micStream;
-    attachMediaRecorder(micStream);
-    state.listeningMode = "server";
-  } else {
-    state.listeningMode = "browser";
+    // Desktop WebKit: browser speech recognition is unreliable — prefer server STT.
+    const browserStarted =
+      !("__TAURI_INTERNALS__" in window) && (await startBrowserSpeech("user"));
+    if (!browserStarted) {
+      const micStream = stream || (await requestMicrophone());
+      if (!stream) stream = micStream;
+      attachMediaRecorder(micStream);
+      state.listeningMode = "server";
+    } else {
+      state.listeningMode = "browser";
+    }
+    notify();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Could not start audio capture.";
+    setFatalError(message);
+    stopCaptureTracks();
   }
-  notify();
 }
 
 async function rehydrateSession(id: string) {
@@ -367,10 +449,14 @@ function stopPing() {
 
 async function connect() {
   const token = getStoredToken();
-  if (!sessionId || !token) return;
+  if (!sessionId || !token) {
+    setFatalError("Sign in required before starting coaching.");
+    return;
+  }
 
   const wasReconnect = reconnectAttempts > 0;
   state.connectionState = wasReconnect ? "reconnecting" : "connecting";
+  clearError();
   if (reconnectAttempts === 0) {
     setFsm("connecting");
   } else {
@@ -382,6 +468,9 @@ async function connect() {
   ws.onopen = async () => {
     state.connectionState = "connected";
     setFsm("active");
+    if (wasReconnect) {
+      state.metrics.reconnectCount += 1;
+    }
     reconnectAttempts = 0;
     startPing();
     await startCaptureFromPrepared();
@@ -394,24 +483,21 @@ async function connect() {
     const message = JSON.parse(event.data);
     const payload = message.payload || {};
 
-    if (message.type === "pong") {
-      return;
-    }
-    if (message.type === "session.started") {
-      setFsm("active");
-    }
-    if (message.type === "session.ended") {
-      setFsm("ended");
-    }
+    if (message.type === "pong") return;
+    if (message.type === "session.started") setFsm("active");
+    if (message.type === "session.ended") setFsm("ended");
+
     if (message.type === "transcript.partial") {
       if (payload.speaker === "interviewer" && state.visualProfile === "focused") {
         state.livePartial = payload.text || "";
         notify();
       }
     }
+
     if (message.type === "transcript.final") {
-      if (payload.speaker && payload.speaker !== "interviewer") {
-        return;
+      if (payload.speaker === "user") return;
+      if (lastAudioSentAt) {
+        state.metrics.lastSttLatencyMs = Date.now() - lastAudioSentAt;
       }
       const line = payload.text || "";
       if (line) {
@@ -420,24 +506,29 @@ async function connect() {
         }
         state.currentQuestion = line;
         state.livePartial = "";
+        questionReceivedAt = Date.now();
+        state.thinking = true;
+        setFsm("processing");
         notify();
       }
     }
+
     if (message.type === "suggestion.partial") {
       state.thinking = true;
-      state.fsmState = "processing";
       queueSuggestionUpdate(payload.content || "", payload.outputId || "", false);
     }
+
     if (message.type === "suggestion.final") {
       queueSuggestionUpdate(payload.content || "", payload.outputId || "", true);
     }
+
     if (message.type === "error") {
       const recoverable = Boolean(payload.recoverable);
+      const msg = payload.message || "Realtime error";
       if (recoverable) {
-        state.error = payload.message || "Realtime error";
-        notify();
+        setRecoverableError(msg);
       } else {
-        setError(payload.message || "Realtime error");
+        setFatalError(msg);
       }
     }
   };
@@ -449,7 +540,7 @@ async function connect() {
     recognition?.stop();
     recognition = null;
 
-    if (active && reconnectAttempts < 5 && systemStream?.getAudioTracks().some((t) => t.readyState === "live")) {
+    if (active && reconnectAttempts < 5) {
       reconnectAttempts += 1;
       const delay = [1000, 2000, 5000][Math.min(reconnectAttempts - 1, 2)] || 5000;
       state.connectionState = "reconnecting";
@@ -459,7 +550,7 @@ async function connect() {
     }
 
     if (active && reconnectAttempts >= 5) {
-      setError("Connection lost. Restart coaching from Control Center.");
+      setFatalError("Connection lost. Restart coaching from Control Center.");
     }
     stopCaptureTracks();
     if (!active) {
@@ -469,26 +560,54 @@ async function connect() {
   };
 
   ws.onerror = () => {
-    setError("WebSocket connection failed");
+    if (active && reconnectAttempts < 5) return;
+    setFatalError("WebSocket connection failed");
   };
+}
+
+async function ensureControlListeners() {
+  if (!controlUnlisten) {
+    controlUnlisten = await listen<CoachControlPayload>(COACH_CONTROL_EVENT, (event) => {
+      if (event.payload.action === "stop") {
+        void stopCoachSession();
+      }
+      if (event.payload.action === "retry") {
+        reconnectAttempts = 0;
+        clearError();
+        void connect();
+      }
+      if (event.payload.action === "hide") {
+        void hideOverlayOnly();
+      }
+    });
+  }
+  if (!markQuestionUnlisten) {
+    markQuestionUnlisten = await listen("coach/mark-question", () => {
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "control", action: "mark_question" }));
+      }
+    });
+  }
 }
 
 export function subscribeCoachState(listener: (snapshot: CoachStateSnapshot) => void) {
   listeners.add(listener);
-  listener({ ...state, transcriptHistory: [...state.transcriptHistory] });
+  listener({ ...state, transcriptHistory: [...state.transcriptHistory], metrics: { ...state.metrics } });
   return () => {
     listeners.delete(listener);
   };
 }
 
 export function getCoachState() {
-  return { ...state, transcriptHistory: [...state.transcriptHistory] };
+  return { ...state, transcriptHistory: [...state.transcriptHistory], metrics: { ...state.metrics } };
 }
 
 export async function prepareCoachCapture(nextAudioInput: AudioInputMode) {
   audioInput = nextAudioInput;
+  stopCaptureTracks();
   systemStream?.getTracks().forEach((track) => track.stop());
   systemStream = null;
+  stream = null;
 
   if (audioInput === "system" || audioInput === "both") {
     try {
@@ -499,13 +618,20 @@ export async function prepareCoachCapture(nextAudioInput: AudioInputMode) {
   }
 
   if (audioInput === "mic" || audioInput === "both") {
-    try {
-      await requestMicrophone();
-    } catch {
-      throw new Error(
-        "Microphone access denied. Open System Settings → Privacy & Security → Microphone and allow LockedIn Copilot.",
-      );
-    }
+    await requestMicrophone();
+  }
+}
+
+export async function applyOverlayDefaults(profile: VisualProfile, opacity = 0.45) {
+  state.visualProfile = profile;
+  state.opacity = opacity;
+  notify();
+  try {
+    await invoke("set_overlay_visual_profile", { profile });
+    await invoke("set_overlay_opacity", { opacity });
+    await invoke("set_overlay_clickthrough", { enabled: false });
+  } catch {
+    // browser dev fallback
   }
 }
 
@@ -515,7 +641,9 @@ export async function startCoachSession(options: {
   sessionMode?: string;
   sessionCompany?: string;
   sessionStrategy?: "live_answer" | "critique";
+  practiceQuestion?: string;
   audioInput: AudioInputMode;
+  visualProfile?: VisualProfile;
 }) {
   if (active) return;
   sessionId = options.sessionId;
@@ -525,24 +653,29 @@ export async function startCoachSession(options: {
   audioInput = options.audioInput;
   active = true;
   reconnectAttempts = 0;
+  questionReceivedAt = null;
+  firstPartialAt = null;
   state.sessionId = sessionId;
   state.sessionTitle = sessionTitle;
   state.sessionMode = sessionMode;
   state.sessionCompany = sessionCompany;
   state.sessionStrategy = options.sessionStrategy || "live_answer";
-  state.currentQuestion = "";
+  state.practiceQuestion = options.practiceQuestion || "";
+  state.currentQuestion = options.practiceQuestion || "";
   state.livePartial = "";
   state.suggestion = "";
   state.suggestionFinal = false;
   state.transcriptHistory = [];
   state.error = null;
+  state.errorRecoverable = false;
   state.queuedQuestion = false;
   state.thinking = false;
+  state.metrics = { ...defaultMetrics(), audioMode: audioInput };
 
-  if (!controlUnlisten) {
-    await ensureControlListeners();
-  }
+  const profile = options.visualProfile || (options.sessionStrategy === "critique" ? "focused" : "discrete");
+  await applyOverlayDefaults(profile, profile === "discrete" ? 0.45 : 1);
 
+  await ensureControlListeners();
   await connect();
 }
 
@@ -560,6 +693,19 @@ export async function stopCoachSession() {
   state.connectionState = "idle";
   state.listeningMode = "none";
   setFsm("ended");
+  try {
+    await invoke("hide_overlay");
+  } catch {
+    // ignore
+  }
+}
+
+export async function hideOverlayOnly() {
+  try {
+    await invoke("hide_overlay");
+  } catch {
+    // ignore
+  }
 }
 
 export function resetCoachState() {
@@ -576,6 +722,7 @@ export function resetCoachState() {
   state.sessionMode = "";
   state.sessionCompany = "";
   state.sessionStrategy = "live_answer";
+  state.practiceQuestion = "";
   state.connectionState = "idle";
   state.listeningMode = "none";
   state.currentQuestion = "";
@@ -587,15 +734,9 @@ export function resetCoachState() {
   state.thinking = false;
   state.transcriptHistory = [];
   state.error = null;
+  state.errorRecoverable = false;
+  state.metrics = defaultMetrics();
   notify();
-}
-
-export async function dismissOverlay() {
-  if (active) {
-    await stopCoachSession();
-  } else {
-    resetCoachState();
-  }
 }
 
 export function setCoachVisualProfile(profile: VisualProfile) {
@@ -614,4 +755,10 @@ export async function initCoachBus() {
 
 export function isSystemAudioSupported() {
   return typeof navigator.mediaDevices?.getDisplayMedia === "function";
+}
+
+export async function retryCoachConnection() {
+  reconnectAttempts = 0;
+  clearError();
+  await connect();
 }

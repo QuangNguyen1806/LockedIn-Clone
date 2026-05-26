@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../lib/api";
+import { startLiveCoach } from "../lib/startLiveCoach";
 
 type Preset = {
   id: string;
@@ -24,6 +25,7 @@ export function NewSessionPage() {
   const [presets, setPresets] = useState<Preset[]>([]);
   const [presetId, setPresetId] = useState(searchParams.get("preset") || "");
   const [error, setError] = useState("");
+  const [starting, setStarting] = useState(false);
 
   useEffect(() => {
     api
@@ -54,6 +56,23 @@ export function NewSessionPage() {
       navigate(`/history/${session.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create session");
+    }
+  }
+
+  async function onCreateAndStart(e: FormEvent) {
+    e.preventDefault();
+    setError("");
+    setStarting(true);
+    try {
+      await startLiveCoach({
+        title,
+        config: { mode, company, role, tone, customInstructions },
+        navigate: (path) => navigate(path),
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to start coaching");
+    } finally {
+      setStarting(false);
     }
   }
 
@@ -116,9 +135,14 @@ export function NewSessionPage() {
           />
         </div>
         {error && <p className="error">{error}</p>}
-        <button type="submit" className="primary">
-          Create session
-        </button>
+        <div className="controls">
+          <button type="submit" className="secondary">
+            Create session
+          </button>
+          <button type="button" className="primary" disabled={starting} onClick={(e) => void onCreateAndStart(e)}>
+            {starting ? "Starting…" : "Create & start coaching"}
+          </button>
+        </div>
       </form>
     </div>
   );

@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useState } from "react";
+import { setCoachOpacity, setCoachVisualProfile } from "../stores/sessionStore";
 import { VisualProfile } from "../stores/coachTypes";
 
 export function useOverlayControls() {
@@ -10,6 +11,7 @@ export function useOverlayControls() {
 
   const setOpacity = useCallback(async (value: number) => {
     setOpacityState(value);
+    setCoachOpacity(value);
     try {
       await invoke("set_overlay_opacity", { opacity: value });
     } catch {
@@ -32,6 +34,7 @@ export function useOverlayControls() {
 
   const setVisualProfile = useCallback(async (profile: VisualProfile) => {
     setVisualProfileState(profile);
+    setCoachVisualProfile(profile);
     try {
       await invoke("set_overlay_visual_profile", { profile });
     } catch {
@@ -45,23 +48,29 @@ export function useOverlayControls() {
 
   useEffect(() => {
     let cancelled = false;
-    void invoke<{ opacity: number; visual_profile: string }>("get_overlay_settings")
+    void invoke<{ opacity: number; visual_profile: string; click_through?: boolean }>("get_overlay_settings")
       .then((settings) => {
         if (cancelled) return;
         setOpacityState(settings.opacity);
-        setVisualProfileState(
-          settings.visual_profile === "focused" ? "focused" : "discrete",
-        );
+        setVisualProfileState(settings.visual_profile === "focused" ? "focused" : "discrete");
+        if (typeof settings.click_through === "boolean") {
+          setClickThroughState(settings.click_through);
+        }
       })
       .catch(() => undefined);
 
     const unlisteners = [
       listen<number>("overlay-opacity-changed", (event) => {
-        if (!cancelled) setOpacityState(event.payload);
+        if (!cancelled) {
+          setOpacityState(event.payload);
+          setCoachOpacity(event.payload);
+        }
       }),
       listen<string>("overlay-profile-changed", (event) => {
         if (!cancelled) {
-          setVisualProfileState(event.payload === "focused" ? "focused" : "discrete");
+          const profile = event.payload === "focused" ? "focused" : "discrete";
+          setVisualProfileState(profile);
+          setCoachVisualProfile(profile);
         }
       }),
       listen<boolean>("click-through-changed", (event) => {

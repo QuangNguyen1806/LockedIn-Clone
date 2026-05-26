@@ -1,10 +1,12 @@
+mod backend;
 mod window;
 
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Emitter, Manager, WindowEvent,
+    Emitter, Manager, RunEvent, WindowEvent,
 };
+use std::sync::Mutex;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 #[cfg(target_os = "macos")]
@@ -88,6 +90,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .manage(Mutex::new(backend::BackendState::default()))
         .invoke_handler(tauri::generate_handler![
             window::show_overlay,
             window::hide_overlay,
@@ -96,6 +99,7 @@ pub fn run() {
             window::set_overlay_position,
             window::get_overlay_bounds,
             window::snap_overlay,
+            window::snap_overlay_nearest,
             window::set_overlay_visual_profile,
             window::get_overlay_settings,
             window::set_click_through,
@@ -105,6 +109,10 @@ pub fn run() {
             window::quit_app,
         ])
         .setup(|app| {
+            if let Err(err) = backend::start(app.handle()) {
+                eprintln!("[lockedin] Backend autostart failed: {err}");
+            }
+
             let show_app = MenuItem::with_id(app, "show_app", "Show App", true, None::<&str>)?;
             let show_overlay =
                 MenuItem::with_id(app, "show_overlay", "Show Overlay", true, None::<&str>)?;
@@ -176,6 +184,11 @@ pub fn run() {
             register_shortcuts(app)?;
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if let RunEvent::Exit = event {
+                backend::shutdown(&app_handle);
+            }
+        });
 }

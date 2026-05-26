@@ -10,18 +10,30 @@ import {
 } from "../stores/coachTypes";
 import "../styles/overlay.css";
 
-function statusDot(fsm: SessionFsmState, connectionState: string, thinking: boolean) {
-  if (fsm === "error") return "red";
-  if (connectionState === "connecting" || connectionState === "reconnecting") return "yellow";
-  if (thinking || fsm === "processing") return "yellow";
+function statusDot(
+  fsm: SessionFsmState,
+  connectionState: string,
+  thinking: boolean,
+  errorRecoverable: boolean,
+) {
+  if (fsm === "error" && !errorRecoverable) return "red";
+  if (errorRecoverable || connectionState === "connecting" || connectionState === "reconnecting") {
+    return "yellow";
+  }
+  if (thinking || fsm === "processing" || fsm === "answer_streaming") return "yellow";
   if (fsm === "active" && connectionState === "connected") return "green";
   return "gray";
 }
 
-function statusLabel(fsm: SessionFsmState, connectionState: string, thinking: boolean) {
+function statusLabel(
+  fsm: SessionFsmState,
+  connectionState: string,
+  thinking: boolean,
+) {
   if (fsm === "error") return "Error";
   if (connectionState === "reconnecting") return "Reconnecting…";
   if (connectionState === "connecting" || fsm === "connecting") return "Connecting…";
+  if (fsm === "answer_streaming") return "Streaming…";
   if (thinking || fsm === "processing") return "Thinking…";
   if (fsm === "ending") return "Ending…";
   if (fsm === "ended") return "Ended";
@@ -29,20 +41,9 @@ function statusLabel(fsm: SessionFsmState, connectionState: string, thinking: bo
   return "Idle";
 }
 
-function nearestCorner(x: number, y: number, width: number, height: number, screenW: number, screenH: number) {
-  const cx = x + width / 2;
-  const cy = y + height / 2;
-  const left = cx < screenW / 2;
-  const top = cy < screenH / 2;
-  if (top && left) return "top-left";
-  if (top && !left) return "top-right";
-  if (!top && left) return "bottom-left";
-  return "bottom-right";
-}
-
 export function OverlayPage() {
   const coach = useCoachState({ tauriEventsOnly: true });
-  const { opacity, setOpacity, clickThrough, toggleClickThrough, visualProfile, toggleVisualProfile } =
+  const { opacity, setOpacity, clickThrough, setClickThrough, toggleClickThrough, visualProfile, toggleVisualProfile } =
     useOverlayControls();
   const [flashFinal, setFlashFinal] = useState(false);
   const dragRef = useRef<{ dragging: boolean; startX: number; startY: number; winX: number; winY: number } | null>(
@@ -50,9 +51,28 @@ export function OverlayPage() {
   );
   const prevFinalRef = useRef(false);
 
+  const compact =
+    visualProfile === "discrete" &&
+    coach.fsmState === "idle" &&
+    !coach.currentQuestion &&
+    !coach.suggestion &&
+    !coach.thinking;
+
   useEffect(() => {
     document.documentElement.classList.add("overlay-root");
+    void setClickThrough(false);
     return () => document.documentElement.classList.remove("overlay-root");
+  }, [setClickThrough]);
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        void hideOverlay();
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
   useEffect(() => {
@@ -70,13 +90,12 @@ export function OverlayPage() {
     await emit(COACH_CONTROL_EVENT, { action });
   }
 
-  async function dismissOverlayWindow() {
-    await emitControl("dismiss");
-    try {
-      await invoke("hide_overlay");
-    } catch {
-      // browser dev fallback
-    }
+  async function hideOverlay() {
+    await emitControl("hide");
+  }
+
+  async function stopSession() {
+    await emitControl("stop");
   }
 
   async function copyAnswer() {
@@ -104,7 +123,7 @@ export function OverlayPage() {
   useEffect(() => {
     async function onMouseMove(event: MouseEvent) {
       const drag = dragRef.current;
-      if (!drag?.dragging) return;
+      if (!drag?.dragging || clickThrough) return;
       const dx = event.screenX - drag.startX;
       const dy = event.screenY - drag.startY;
       try {
@@ -114,26 +133,15 @@ export function OverlayPage() {
       }
     }
 
-    async function onMouseUp(event: MouseEvent) {
+    async function onMouseUp() {
       const drag = dragRef.current;
       if (!drag?.dragging) return;
       dragRef.current = null;
       try {
-        const bounds = await invoke<{ x: number; y: number; width: number; height: number }>("get_overlay_bounds");
-        const monitor = window.screen;
-        const corner = nearestCorner(
-          bounds.x,
-          bounds.y,
-          bounds.width,
-          bounds.height,
-          monitor.availWidth,
-          monitor.availHeight,
-        );
-        await invoke("snap_overlay", { corner });
+        await invoke("snap_overlay_nearest");
       } catch {
         // ignore snap failures
       }
-      void event;
     }
 
     window.addEventListener("mousemove", onMouseMove);
@@ -142,68 +150,100 @@ export function OverlayPage() {
       window.removeEventListener("mousemove", onMouseMove);
       window.removeEventListener("mouseup", onMouseUp);
     };
-  }, []);
+  }, [clickThrough]);
 
   const meta = [coach.sessionMode, coach.sessionCompany].filter(Boolean).join(" · ");
   const showPartial =
     visualProfile === "focused" && coach.livePartial && !coach.thinking && coach.fsmState !== "processing";
+  const questionText =
+    coach.currentQuestion ||
+    coach.practiceQuestion ||
+    (coach.fsmState === "idle" && !coach.sessionId ? "" : "");
 
   return (
     <div
-      className={`overlay-page ${visualProfile}`}
+      className={`overlay-page ${visualProfile} ${compact ? "compact" : ""}`}
       style={{ opacity: visualProfile === "discrete" ? opacity : 1 }}
     >
+      {coach.error && (
+        <div className={`overlay-banner ${coach.errorRecoverable ? "recoverable" : "fatal"}`}>
+          <span>{coach.errorRecoverable ? coach.error : `AI error — ${coach.error}`}</span>
+          {(coach.errorRecoverable || coach.fsmState === "error") && (
+            <button type="button" onClick={() => void emitControl("retry")}>
+              Retry
+            </button>
+          )}
+        </div>
+      )}
+
       <div className="overlay-panel">
-        <div className="overlay-status" onMouseDown={(e) => void onStatusMouseDown(e)}>
-          <span className={`status-dot ${statusDot(coach.fsmState, coach.connectionState, coach.thinking)}`} />
+        <div
+          className={`overlay-status ${clickThrough ? "locked" : ""}`}
+          onMouseDown={(e) => void onStatusMouseDown(e)}
+        >
+          <span
+            className={`status-dot ${statusDot(coach.fsmState, coach.connectionState, coach.thinking, coach.errorRecoverable)}`}
+          />
           <strong>{statusLabel(coach.fsmState, coach.connectionState, coach.thinking)}</strong>
           {meta && <span className="overlay-meta">{meta}</span>}
-          <button
-            type="button"
-            className="overlay-close"
-            title="Close overlay"
-            onClick={(e) => {
-              e.stopPropagation();
-              void dismissOverlayWindow();
-            }}
-          >
-            ✕
-          </button>
+          {clickThrough ? (
+            <span className="overlay-hint">⌘⇧I to interact</span>
+          ) : (
+            <button
+              type="button"
+              className="overlay-close"
+              title="Hide overlay (session keeps running)"
+              onClick={(e) => {
+                e.stopPropagation();
+                void hideOverlay();
+              }}
+            >
+              ✕
+            </button>
+          )}
         </div>
 
-        <div className="overlay-content">
+        <div className={`overlay-content ${compact ? "compact" : ""}`}>
           {coach.fsmState === "idle" && !coach.sessionId ? (
             <p className="overlay-empty">Start coaching from Control Center</p>
           ) : (
             <>
-              {coach.currentQuestion ? (
-                <div className="overlay-question">Q: {coach.currentQuestion}</div>
+              {questionText ? (
+                <div className="overlay-question">Q: {questionText}</div>
               ) : (
                 <div className="overlay-question overlay-empty">Waiting for a question…</div>
               )}
               {showPartial && <div className="overlay-question overlay-empty">{coach.livePartial}</div>}
               {coach.queuedQuestion && <div className="overlay-queued">Next question detected…</div>}
-              <div
-                className={`overlay-answer ${coach.thinking && !coach.suggestion ? "thinking" : ""} ${flashFinal ? "final-flash" : ""}`}
-              >
-                {coach.thinking && !coach.suggestion
-                  ? "Thinking…"
-                  : coach.suggestion ||
-                    (coach.fsmState === "active"
-                      ? coach.sessionStrategy === "critique"
-                        ? "Feedback will appear here…"
-                        : "Answer will appear here…"
-                      : "")}
-              </div>
+              {!compact && (
+                <div
+                  className={`overlay-answer ${coach.thinking && !coach.suggestion ? "thinking" : ""} ${flashFinal ? "final-flash" : ""}`}
+                >
+                  {coach.fsmState === "answer_streaming" && coach.suggestion
+                    ? coach.suggestion
+                    : coach.thinking && !coach.suggestion
+                      ? "Thinking…"
+                      : coach.suggestion ||
+                        (coach.fsmState === "active"
+                          ? coach.sessionStrategy === "critique"
+                            ? "Feedback will appear here…"
+                            : "Answer will appear here…"
+                          : "")}
+                </div>
+              )}
             </>
           )}
         </div>
 
-        {coach.error && <div className="overlay-error">{coach.error}</div>}
-
-        <div className="overlay-controls">
-          <button type="button" title="Stop" onClick={() => void dismissOverlayWindow()} disabled={clickThrough}>
-            ⏹
+        <div className={`overlay-controls ${clickThrough ? "locked" : ""}`}>
+          <button
+            type="button"
+            className="overlay-btn-label"
+            title="Stop session"
+            onClick={() => void stopSession()}
+            disabled={clickThrough}
+          >
+            Stop
           </button>
           <input
             type="range"
@@ -215,20 +255,32 @@ export function OverlayPage() {
             disabled={clickThrough}
             title="Opacity"
           />
-          <button type="button" title="Visual profile" onClick={() => void toggleVisualProfile()}>
-            👁
+          <button
+            type="button"
+            className="overlay-btn-label"
+            title="Toggle visual profile"
+            onClick={() => void toggleVisualProfile()}
+            disabled={clickThrough}
+          >
+            {visualProfile === "discrete" ? "Discrete" : "Focus"}
           </button>
-          <button type="button" title="Click-through" onClick={() => void toggleClickThrough()}>
-            {clickThrough ? "🔒" : "🔓"}
+          <button
+            type="button"
+            className={`overlay-btn-label ${clickThrough ? "active" : ""}`}
+            title={clickThrough ? "Locked — clicks pass through" : "Interactive — click and drag"}
+            onClick={() => void toggleClickThrough()}
+          >
+            {clickThrough ? "Locked" : "Interactive"}
           </button>
-          <button type="button" title="Copy answer" onClick={() => void copyAnswer()} disabled={clickThrough || !coach.suggestion}>
-            📋
+          <button
+            type="button"
+            className="overlay-btn-label"
+            title="Copy answer"
+            onClick={() => void copyAnswer()}
+            disabled={clickThrough || !coach.suggestion}
+          >
+            Copy
           </button>
-          {coach.fsmState === "error" && (
-            <button type="button" onClick={() => void emitControl("retry")}>
-              Retry
-            </button>
-          )}
         </div>
       </div>
     </div>
