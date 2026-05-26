@@ -3,15 +3,16 @@ import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api, getStoredToken } from "../lib/api";
 import { startLiveCoach } from "../lib/startLiveCoach";
+import {
+  defaultAudioInputMode,
+  isMacOsTauri,
+  isSystemAudioSupportedOnPlatform,
+  macOsSystemAudioHelpText,
+} from "../lib/systemAudio";
 import { useCoachState } from "../hooks/useCoachState";
 import { requestMicrophonePermission, PermissionState } from "../lib/permissions";
-import { defaultAudioInputMode } from "../lib/systemAudio";
 import { AudioInputMode } from "../stores/coachTypes";
-import {
-  isSystemAudioSupported,
-  retryCoachConnection,
-  stopCoachSession,
-} from "../stores/sessionStore";
+import { retryCoachConnection, stopCoachSession } from "../stores/sessionStore";
 
 type Session = {
   id: string;
@@ -20,12 +21,11 @@ type Session = {
   config?: { mode?: string; company?: string };
 };
 
-function listeningHint(mode: string, audioInput: AudioInputMode) {
+function listeningHint(mode: string) {
   if (mode === "system") return "Listening to call/system audio from your screen share";
   if (mode === "both") return "Listening to call audio + your microphone";
   if (mode === "browser") return "Listening via live speech recognition (microphone)";
   if (mode === "server") return "Listening via server transcription (microphone)";
-  if (audioInput === "system") return "Waiting for screen share permission...";
   return "Not listening yet";
 }
 
@@ -38,10 +38,11 @@ export function CoachPage() {
   const [micPermission, setMicPermission] = useState<PermissionState>("unknown");
   const [permissionMessage, setPermissionMessage] = useState("");
   const [startError, setStartError] = useState("");
-  const [showMicFallback, setShowMicFallback] = useState(false);
+  const [starting, setStarting] = useState(false);
   const [showDebug, setShowDebug] = useState(false);
   const coach = useCoachState();
   const active = coach.fsmState !== "idle" && coach.fsmState !== "ended";
+  const systemAudioAvailable = isSystemAudioSupportedOnPlatform();
 
   useEffect(() => {
     if (token) {
@@ -83,14 +84,14 @@ export function CoachPage() {
     }
   }
 
-  async function handleStartCoaching(nextAudioInput: AudioInputMode = audioInput) {
+  async function handleStartCoaching() {
     setStartError("");
-    setShowMicFallback(false);
     const selected = sessions.find((s) => s.id === sessionId);
     if (!selected) {
       setStartError("Select a session first.");
       return;
     }
+    setStarting(true);
     try {
       await startLiveCoach({
         sessionId: selected.id,
@@ -99,17 +100,25 @@ export function CoachPage() {
           mode: selected.config?.mode,
           company: selected.config?.company,
         },
-        audioInput: nextAudioInput,
+        audioInput,
       });
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Could not start audio capture.";
+      const message =
+        err instanceof Error
+          ? err.message
+          : typeof err === "string"
+            ? err
+            : err && typeof err === "object" && "message" in err && typeof (err as { message: unknown }).message === "string"
+              ? (err as { message: string }).message
+              : "Could not start audio capture.";
       setStartError(message);
-      setShowMicFallback(nextAudioInput !== "mic");
       try {
         await invoke("hide_overlay");
       } catch {
         // ignore
       }
+    } finally {
+      setStarting(false);
     }
   }
 
@@ -138,8 +147,8 @@ export function CoachPage() {
           </div>
         </div>
         <p className="muted">
-          Start coaching to open the overlay window. Capture interview questions from your video call and get
-          real-time answers grounded in your resume and job description.
+          Start coaching opens the floating overlay and attaches it to this session. Speak questions aloud
+          (or use ⌘⇧M to mark the last heard line as a question).
         </p>
       </section>
 
@@ -163,17 +172,17 @@ export function CoachPage() {
             onChange={(e) => setAudioInput(e.target.value as AudioInputMode)}
             disabled={active}
           >
-            {isSystemAudioSupported() && (
-              <option value="system">Call audio (system) — recommended for interviews</option>
+            <option value="mic">Microphone — recommended on macOS</option>
+            {systemAudioAvailable && (
+              <option value="system">Call audio (system)</option>
             )}
-            <option value="mic">Microphone only</option>
-            {isSystemAudioSupported() && <option value="both">Call audio + microphone</option>}
+            {systemAudioAvailable && <option value="both">Call audio + microphone</option>}
           </select>
         </div>
         <div className="controls">
           {!active ? (
-            <button className="primary" disabled={!sessionId} onClick={() => void handleStartCoaching()}>
-              Start coaching
+            <button className="primary" disabled={!sessionId || starting} onClick={() => void handleStartCoaching()}>
+              {starting ? "Starting…" : "Start coaching"}
             </button>
           ) : (
             <button onClick={() => void handleStop()}>Stop coaching</button>
@@ -186,26 +195,16 @@ export function CoachPage() {
           <span className="badge">{coach.connectionState}</span>
           <span className="badge">{coach.fsmState}</span>
         </div>
-        {audioInput !== "mic" && (
-          <p className="hint">
-            On macOS, call-audio capture is unreliable in desktop apps. If screen share succeeds but audio
-            fails, use <strong>Microphone only</strong> and point your mic at the call (or use speakers).
-          </p>
-        )}
-        {showMicFallback && (
-          <div className="controls">
-            <button type="button" className="primary" onClick={() => void handleStartCoaching("mic")}>
-              Start with microphone instead
-            </button>
-          </div>
+        {(isMacOsTauri() || !systemAudioAvailable) && (
+          <p className="hint">{macOsSystemAudioHelpText()}</p>
         )}
       </section>
 
       <section className="card grid">
         <h3>Permissions</h3>
         <p className="hint">
-          LockedIn Copilot only appears in macOS Privacy settings <strong>after</strong> you grant access once.
-          Call-audio mode needs Screen Recording; microphone modes need Microphone.
+          Grant microphone access before your first coaching session. LockedIn Copilot appears in macOS Privacy
+          settings only after you allow access once.
         </p>
         <div className="controls">
           <button type="button" className="secondary" onClick={() => void handleRequestMicrophone()} disabled={active}>
@@ -223,7 +222,7 @@ export function CoachPage() {
             {showDebug ? "Hide debug" : "Show debug (⌘⇧D)"}
           </button>
         </div>
-        <p className="hint">{listeningHint(coach.listeningMode, audioInput)}</p>
+        <p className="hint">{listeningHint(coach.listeningMode)}</p>
         {coach.error && (
           <p className={coach.errorRecoverable ? "hint" : "error"}>
             {coach.errorRecoverable ? `Recoverable: ${coach.error}` : coach.error}

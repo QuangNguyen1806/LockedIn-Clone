@@ -2,16 +2,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewWindow};
+use tauri::window::Color;
 use tauri_plugin_store::StoreExt;
 
 static CLICK_THROUGH_ENABLED: AtomicBool = AtomicBool::new(false);
 
 const STORE_PATH: &str = "overlay-settings.json";
 const OVERLAY_LABEL: &str = "overlay";
-const MIN_WIDTH: f64 = 440.0;
-const MIN_HEIGHT: f64 = 180.0;
-const MAX_WIDTH: f64 = 520.0;
-const MAX_HEIGHT: f64 = 280.0;
+const MIN_WIDTH: f64 = 520.0;
+const MIN_HEIGHT: f64 = 320.0;
+const MAX_WIDTH: f64 = 720.0;
+const MAX_HEIGHT: f64 = 560.0;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OverlayBounds {
@@ -37,11 +38,11 @@ pub struct OverlaySettings {
 }
 
 fn default_width() -> f64 {
-    440.0
+    580.0
 }
 
 fn default_height() -> f64 {
-    240.0
+    420.0
 }
 
 impl Default for OverlaySettings {
@@ -50,7 +51,7 @@ impl Default for OverlaySettings {
             x: 24.0,
             y: 24.0,
             corner: "top-right".to_string(),
-            opacity: 0.45,
+            opacity: 0.42,
             visual_profile: "discrete".to_string(),
             click_through: false,
             width: default_width(),
@@ -67,7 +68,9 @@ fn overlay_window(app: &AppHandle) -> Result<WebviewWindow, String> {
 fn load_settings(app: &AppHandle) -> Result<OverlaySettings, String> {
     let store = app.store(STORE_PATH).map_err(|e| e.to_string())?;
     if let Some(value) = store.get("settings") {
-        serde_json::from_value(value.clone()).map_err(|e| e.to_string())
+        let mut settings: OverlaySettings = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+        settings.opacity = settings.opacity.clamp(0.15, 0.85);
+        Ok(settings)
     } else {
         Ok(OverlaySettings::default())
     }
@@ -101,6 +104,9 @@ pub fn configure_overlay(window: &WebviewWindow) -> Result<(), String> {
     window.set_always_on_top(true).map_err(|e| e.to_string())?;
     window.set_decorations(false).map_err(|e| e.to_string())?;
     window.set_skip_taskbar(true).map_err(|e| e.to_string())?;
+    window
+        .set_background_color(Some(Color(0, 0, 0, 0)))
+        .map_err(|e| e.to_string())?;
     window
         .set_min_size(Some(LogicalSize::new(MIN_WIDTH, MIN_HEIGHT)))
         .map_err(|e| e.to_string())?;
@@ -174,7 +180,7 @@ pub fn hide_overlay(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub fn set_overlay_opacity(app: AppHandle, opacity: f64) -> Result<(), String> {
-    let clamped = opacity.clamp(0.2, 1.0);
+    let clamped = opacity.clamp(0.15, 0.85);
     let mut settings = load_settings(&app)?;
     settings.opacity = clamped;
     save_settings(&app, &settings)?;

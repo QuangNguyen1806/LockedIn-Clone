@@ -29,16 +29,27 @@ function statusLabel(
   fsm: SessionFsmState,
   connectionState: string,
   thinking: boolean,
+  turnPhase: string,
 ) {
+  if (turnPhase === "your_turn") return "Your turn — answer now";
+  if (turnPhase === "coaching" || thinking) return "Thinking…";
   if (fsm === "error") return "Error";
   if (connectionState === "reconnecting") return "Reconnecting…";
   if (connectionState === "connecting" || fsm === "connecting") return "Connecting…";
   if (fsm === "answer_streaming") return "Streaming…";
-  if (thinking || fsm === "processing") return "Thinking…";
   if (fsm === "ending") return "Ending…";
   if (fsm === "ended") return "Ended";
-  if (fsm === "active") return "Listening…";
+  if (fsm === "active" || connectionState === "connected") return "Listening…";
   return "Idle";
+}
+
+function formatTranscriptTime(timestampMs: number) {
+  const date = new Date(timestampMs);
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function speakerLabel(speaker: string) {
+  return speaker === "user" ? "You" : "Interviewer";
 }
 
 export function OverlayPage() {
@@ -50,13 +61,6 @@ export function OverlayPage() {
     null,
   );
   const prevFinalRef = useRef(false);
-
-  const compact =
-    visualProfile === "discrete" &&
-    coach.fsmState === "idle" &&
-    !coach.currentQuestion &&
-    !coach.suggestion &&
-    !coach.thinking;
 
   useEffect(() => {
     document.documentElement.classList.add("overlay-root");
@@ -153,17 +157,22 @@ export function OverlayPage() {
   }, [clickThrough]);
 
   const meta = [coach.sessionMode, coach.sessionCompany].filter(Boolean).join(" · ");
-  const showPartial =
-    visualProfile === "focused" && coach.livePartial && !coach.thinking && coach.fsmState !== "processing";
-  const questionText =
-    coach.currentQuestion ||
-    coach.practiceQuestion ||
-    (coach.fsmState === "idle" && !coach.sessionId ? "" : "");
+  const sessionActive =
+    coach.fsmState !== "idle" && coach.fsmState !== "ended" && Boolean(coach.sessionId);
+  const questionText = sessionActive
+    ? coach.currentQuestion || coach.practiceQuestion || ""
+    : "";
+  const showLiveHeard =
+    coach.livePartial &&
+    coach.fsmState !== "idle" &&
+    coach.fsmState !== "ended" &&
+    coach.livePartial !== questionText;
+  const recentTranscript = coach.transcriptFeed.slice(-4);
 
   return (
     <div
-      className={`overlay-page ${visualProfile} ${compact ? "compact" : ""}`}
-      style={{ opacity: visualProfile === "discrete" ? opacity : 1 }}
+      className={`overlay-page ${visualProfile}`}
+      style={{ ["--panel-alpha" as string]: String(opacity) }}
     >
       {coach.error && (
         <div className={`overlay-banner ${coach.errorRecoverable ? "recoverable" : "fatal"}`}>
@@ -184,7 +193,7 @@ export function OverlayPage() {
           <span
             className={`status-dot ${statusDot(coach.fsmState, coach.connectionState, coach.thinking, coach.errorRecoverable)}`}
           />
-          <strong>{statusLabel(coach.fsmState, coach.connectionState, coach.thinking)}</strong>
+          <strong>{statusLabel(coach.fsmState, coach.connectionState, coach.thinking, coach.turnPhase)}</strong>
           {meta && <span className="overlay-meta">{meta}</span>}
           {clickThrough ? (
             <span className="overlay-hint">⌘⇧I to interact</span>
@@ -203,34 +212,56 @@ export function OverlayPage() {
           )}
         </div>
 
-        <div className={`overlay-content ${compact ? "compact" : ""}`}>
-          {coach.fsmState === "idle" && !coach.sessionId ? (
+        <div className="overlay-content">
+          {!sessionActive ? (
             <p className="overlay-empty">Start coaching from Control Center</p>
           ) : (
             <>
+              {showLiveHeard && (
+                <div className="overlay-heard" aria-live="polite">
+                  {coach.livePartial}
+                </div>
+              )}
+
+              {recentTranscript.length > 0 && (
+                <div className="overlay-transcript-feed">
+                  {recentTranscript.map((entry) => (
+                    <div key={entry.id} className="overlay-transcript-line">
+                      <span className="overlay-transcript-meta">
+                        {speakerLabel(entry.speaker)} · {formatTranscriptTime(entry.timestampMs)}
+                      </span>
+                      <span className="overlay-transcript-text">{entry.text}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
               {questionText ? (
                 <div className="overlay-question">Q: {questionText}</div>
               ) : (
-                <div className="overlay-question overlay-empty">Waiting for a question…</div>
-              )}
-              {showPartial && <div className="overlay-question overlay-empty">{coach.livePartial}</div>}
-              {coach.queuedQuestion && <div className="overlay-queued">Next question detected…</div>}
-              {!compact && (
-                <div
-                  className={`overlay-answer ${coach.thinking && !coach.suggestion ? "thinking" : ""} ${flashFinal ? "final-flash" : ""}`}
-                >
-                  {coach.fsmState === "answer_streaming" && coach.suggestion
-                    ? coach.suggestion
-                    : coach.thinking && !coach.suggestion
-                      ? "Thinking…"
-                      : coach.suggestion ||
-                        (coach.fsmState === "active"
-                          ? coach.sessionStrategy === "critique"
-                            ? "Feedback will appear here…"
-                            : "Answer will appear here…"
-                          : "")}
+                <div className="overlay-question overlay-empty">
+                  {coach.turnPhase === "your_turn"
+                    ? "Answer the question aloud — coaching suggestion below"
+                    : "Listening for the interviewer…"}
                 </div>
               )}
+
+              {coach.queuedQuestion && <div className="overlay-queued">Next question detected…</div>}
+
+              <div
+                className={`overlay-answer ${coach.thinking && !coach.suggestion ? "thinking" : ""} ${flashFinal ? "final-flash" : ""}`}
+              >
+                {coach.fsmState === "answer_streaming" && coach.suggestion
+                  ? coach.suggestion
+                  : coach.thinking && !coach.suggestion
+                    ? "Thinking…"
+                    : coach.suggestion ||
+                      (coach.fsmState === "active"
+                        ? coach.sessionStrategy === "critique"
+                          ? "Feedback will appear here…"
+                          : "Answer will appear here…"
+                        : "")}
+              </div>
             </>
           )}
         </div>
@@ -247,14 +278,15 @@ export function OverlayPage() {
           </button>
           <input
             type="range"
-            min={0.25}
-            max={1}
+            min={0.15}
+            max={0.85}
             step={0.05}
             value={opacity}
             onChange={(e) => void setOpacity(Number(e.target.value))}
             disabled={clickThrough}
-            title="Opacity"
+            title="Panel transparency"
           />
+          <span className="overlay-opacity-label">{Math.round(opacity * 100)}%</span>
           <button
             type="button"
             className="overlay-btn-label"
@@ -262,15 +294,15 @@ export function OverlayPage() {
             onClick={() => void toggleVisualProfile()}
             disabled={clickThrough}
           >
-            {visualProfile === "discrete" ? "Discrete" : "Focus"}
+            {visualProfile === "discrete" ? "Discrete" : "Focused"}
           </button>
           <button
             type="button"
-            className={`overlay-btn-label ${clickThrough ? "active" : ""}`}
-            title={clickThrough ? "Locked — clicks pass through" : "Interactive — click and drag"}
+            className={`overlay-btn-label overlay-lock-btn ${clickThrough ? "active locked" : ""}`}
+            title={clickThrough ? "Locked — clicks pass through (⌘⇧I to unlock)" : "Interactive — click and drag"}
             onClick={() => void toggleClickThrough()}
           >
-            {clickThrough ? "Locked" : "Interactive"}
+            {clickThrough ? "🔒 Locked" : "Interactive"}
           </button>
           <button
             type="button"

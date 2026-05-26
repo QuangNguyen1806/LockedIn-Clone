@@ -87,7 +87,8 @@ def gemini_generate_summary_sync(system_prompt: str, user_prompt: str) -> dict:
 
 
 async def gemini_transcribe_audio(audio_b64: str, mime_type: str = "audio/webm") -> str:
-    url = _gemini_url(settings.gemini_model, stream=False)
+    model = settings.gemini_stt_model or "gemini-2.0-flash"
+    url = _gemini_url(model, stream=False)
     body = {
         "contents": [
             {
@@ -101,9 +102,12 @@ async def gemini_transcribe_audio(audio_b64: str, mime_type: str = "audio/webm")
                     },
                     {
                         "text": (
-                            "Transcribe the spoken words in this audio clip exactly. "
-                            "Return only the transcript text with no labels or commentary. "
-                            "If the clip is silent or unintelligible, return an empty string."
+                            "You are a speech-to-text engine for live job interviews. "
+                            "Transcribe only the exact words spoken in the attached audio. "
+                            "The speaker is usually an interviewer asking behavioral or technical questions "
+                            "(for example: tell me about yourself, tell me about a time you worked on a team). "
+                            "Output the transcript verbatim with no labels, apologies, or commentary. "
+                            "If the audio is silent or unintelligible, output nothing."
                         )
                     },
                 ],
@@ -113,5 +117,10 @@ async def gemini_transcribe_audio(audio_b64: str, mime_type: str = "audio/webm")
     }
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(url, json=body)
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            detail = resp.text[:240].replace(settings.gemini_api_key, "***")
+            raise RuntimeError(
+                f"Gemini transcription failed ({resp.status_code}). "
+                "Try speaking again, or set DEEPGRAM_API_KEY for better speech recognition."
+            ) from None
         return _extract_text(resp.json()).strip()

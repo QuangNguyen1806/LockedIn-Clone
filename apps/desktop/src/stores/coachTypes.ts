@@ -11,6 +11,15 @@ export type SessionFsmState =
 export type AudioInputMode = "mic" | "system" | "both";
 export type ListeningMode = "browser" | "server" | "system" | "both" | "none";
 export type VisualProfile = "discrete" | "focused";
+export type TurnPhase = "listening" | "your_turn" | "coaching";
+
+export interface TranscriptFeedEntry {
+  id: string;
+  speaker: string;
+  text: string;
+  timestampMs: number;
+  isFinal: boolean;
+}
 
 export interface CoachMetrics {
   reconnectCount: number;
@@ -30,8 +39,10 @@ export interface CoachStateSnapshot {
   practiceQuestion: string;
   connectionState: string;
   listeningMode: ListeningMode;
+  turnPhase: TurnPhase;
   currentQuestion: string;
   livePartial: string;
+  transcriptFeed: TranscriptFeedEntry[];
   suggestion: string;
   suggestionFinal: boolean;
   suggestionOutputId: string;

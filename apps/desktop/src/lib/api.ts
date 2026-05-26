@@ -61,6 +61,8 @@ export const api = {
   createSession: (body: Record<string, unknown>) =>
     request("/api/sessions", { method: "POST", body: JSON.stringify(body) }),
   endSession: (id: string) => request(`/api/sessions/${id}/end`, { method: "POST" }),
+  refreshSessionContext: (id: string) =>
+    request(`/api/sessions/${id}/refresh-context`, { method: "POST" }),
   metrics: () =>
     request<{
       totalSessions: number;

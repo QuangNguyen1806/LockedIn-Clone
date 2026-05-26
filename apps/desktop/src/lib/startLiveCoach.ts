@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { api } from "./api";
 import { getDefaultOverlayProfile } from "./overlayPreferences";
-import { defaultAudioInputMode } from "./systemAudio";
+import { defaultAudioInputMode, normalizeAudioInput } from "./systemAudio";
 import { AudioInputMode, VisualProfile } from "../stores/coachTypes";
 import {
   prepareCoachCapture,
@@ -28,6 +28,10 @@ export type StartLiveCoachOptions = {
   navigate?: (path: string) => void;
 };
 
+/**
+ * Preset → create session → prepareCapture → overlay → WebSocket coaching.
+ * Used by Home, Presets, New Session, Practice, Coach, and Session Detail.
+ */
 export async function startLiveCoach(options: StartLiveCoachOptions): Promise<string> {
   let sessionId = options.sessionId || "";
   let sessionTitle = options.title || "Live coaching";
@@ -52,15 +56,22 @@ export async function startLiveCoach(options: StartLiveCoachOptions): Promise<st
     sessionCompany = session.config?.company || sessionCompany;
   }
 
-  const audioInput = options.audioInput ?? defaultAudioInputMode();
+  const audioInput = normalizeAudioInput(options.audioInput ?? defaultAudioInputMode());
   const visualProfile =
     options.visualProfile ??
     (options.strategy === "critique" ? "focused" : getDefaultOverlayProfile());
 
   try {
+    await stopCoachSession().catch(() => undefined);
+    await api.refreshSessionContext(sessionId).catch(() => undefined);
     await prepareCoachCapture(audioInput);
     await invoke("set_overlay_clickthrough", { enabled: false });
     await invoke("show_overlay");
+    try {
+      await invoke("hide_window");
+    } catch {
+      // browser dev fallback
+    }
     await startCoachSession({
       sessionId,
       sessionTitle,

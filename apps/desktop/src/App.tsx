@@ -2,6 +2,7 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { useEffect } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { AppShell } from "./components/AppShell";
+import { requestMicrophonePermission } from "./lib/permissions";
 import { CoachPage } from "./pages/CoachPage";
 import { HistoryPage } from "./pages/HistoryPage";
 import { HomePage } from "./pages/HomePage";
@@ -21,6 +22,7 @@ export default function App() {
       const window = getCurrentWebviewWindow();
       if (window.label === "main") {
         void initCoachBus();
+        void requestMicrophonePermission().then(() => undefined).catch(() => undefined);
       }
     } catch {
       // browser dev fallback

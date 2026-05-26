@@ -1,0 +1,20 @@
+[[permission]]
+identifier = "allow-window-commands"
+description = "Overlay and window control commands used by the coach UI."
+commands.allow = [
+  "show_overlay",
+  "hide_overlay",
+  "set_overlay_opacity",
+  "set_overlay_clickthrough",
+  "set_overlay_position",
+  "get_overlay_bounds",
+  "snap_overlay",
+  "snap_overlay_nearest",
+  "set_overlay_visual_profile",
+  "get_overlay_settings",
+  "set_click_through",
+  "hide_window",
+  "show_window",
+  "hide_all_windows",
+  "quit_app",
+]

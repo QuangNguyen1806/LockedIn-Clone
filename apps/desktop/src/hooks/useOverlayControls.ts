@@ -5,7 +5,7 @@ import { setCoachOpacity, setCoachVisualProfile } from "../stores/sessionStore";
 import { VisualProfile } from "../stores/coachTypes";
 
 export function useOverlayControls() {
-  const [opacity, setOpacityState] = useState(0.45);
+  const [opacity, setOpacityState] = useState(0.42);
   const [clickThrough, setClickThroughState] = useState(false);
   const [visualProfile, setVisualProfileState] = useState<VisualProfile>("discrete");
 

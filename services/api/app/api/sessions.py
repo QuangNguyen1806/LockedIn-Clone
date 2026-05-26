@@ -318,6 +318,30 @@ async def end_session(
     return session_to_response(session)
 
 
+@router.post("/{session_id}/refresh-context", response_model=SessionResponse)
+async def refresh_session_context(
+    session_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Session).where(Session.id == session_id, Session.user_id == user.id)
+    )
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    resume_context = await latest_document_text(db, user.id, "resume")
+    job_description_context = await latest_document_text(db, user.id, "job_description")
+    if resume_context:
+        session.resume_context = resume_context[:4000]
+    if job_description_context:
+        session.job_description_context = job_description_context[:4000]
+    await db.commit()
+    await db.refresh(session)
+    return session_to_response(session)
+
+
 @router.delete("/{session_id}")
 async def delete_session(
     session_id: str,

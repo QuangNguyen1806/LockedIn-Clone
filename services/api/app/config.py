@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-4o-mini"
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash-lite"
+    gemini_stt_model: str = "gemini-2.0-flash"
     llm_provider: str = "auto"
     stt_provider: str = "auto"
     deepgram_api_key: str = ""

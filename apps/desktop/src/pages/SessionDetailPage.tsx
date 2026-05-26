@@ -1,31 +1,68 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../lib/api";
 import { startLiveCoach } from "../lib/startLiveCoach";
+
+type TranscriptLine = { speaker: string; text: string; createdAt?: string };
+type AiOutput = { kind: string; content: string; createdAt: string };
 
 type SessionDetail = {
   id: string;
   title: string;
   status: string;
   config?: { mode?: string; company?: string; role?: string; tone?: string; customInstructions?: string };
-  transcript: Array<{ speaker: string; text: string; createdAt?: string }>;
-  aiOutputs: Array<{ kind: string; content: string; createdAt: string }>;
+  transcript: TranscriptLine[];
+  aiOutputs: AiOutput[];
   summary?: { summary: string; questions: string[]; feedbackBullets: string[] };
 };
 
-function pairQuestionsWithAnswers(session: SessionDetail) {
-  const questions = session.transcript.filter((line) => line.speaker === "interviewer");
+type ConversationBlock = {
+  question: string;
+  userAnswer: string;
+  aiSuggestion: string;
+  aiKind: string;
+};
+
+function buildConversationBlocks(session: SessionDetail): ConversationBlock[] {
+  const blocks: ConversationBlock[] = [];
+  let current: { question: string; userAnswer: string } | null = null;
+
+  for (const line of session.transcript) {
+    if (line.speaker === "interviewer") {
+      if (current) {
+        blocks.push({ ...current, aiSuggestion: "", aiKind: "" });
+      }
+      current = { question: line.text, userAnswer: "" };
+    } else if (line.speaker === "user" && current) {
+      current.userAnswer = current.userAnswer ? `${current.userAnswer} ${line.text}` : line.text;
+    }
+  }
+  if (current) {
+    blocks.push({ ...current, aiSuggestion: "", aiKind: "" });
+  }
+
   const outputs = session.aiOutputs.filter(
     (output) => output.kind === "suggestion" || output.kind === "critique",
   );
-  return questions.map((question, index) => ({
-    question: question.text,
-    answer: outputs[index]?.content || "",
-    createdAt: question.createdAt || outputs[index]?.createdAt,
-  }));
+  outputs.forEach((output, index) => {
+    if (blocks[index]) {
+      blocks[index].aiSuggestion = output.content;
+      blocks[index].aiKind = output.kind;
+    } else {
+      blocks.push({
+        question: "(question not captured)",
+        userAnswer: "",
+        aiSuggestion: output.content,
+        aiKind: output.kind,
+      });
+    }
+  });
+
+  return blocks;
 }
 
 export function SessionDetailPage() {
+  const navigate = useNavigate();
   const { id = "" } = useParams();
   const [session, setSession] = useState<SessionDetail | null>(null);
   const [error, setError] = useState("");
@@ -50,7 +87,7 @@ export function SessionDetailPage() {
     return () => clearInterval(timer);
   }, [polling, id]);
 
-  const qaPairs = useMemo(() => (session ? pairQuestionsWithAnswers(session) : []), [session]);
+  const blocks = useMemo(() => (session ? buildConversationBlocks(session) : []), [session]);
 
   if (!session) return <p className="muted">Loading session...</p>;
 
@@ -82,6 +119,7 @@ export function SessionDetailPage() {
           tone: session.config?.tone,
           customInstructions: session.config?.customInstructions,
         },
+        navigate: (path) => navigate(path),
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not start coaching");
@@ -95,7 +133,9 @@ export function SessionDetailPage() {
       <section className="card">
         <h2>{session.title}</h2>
         <p className="muted">
-          Status: <span className="badge">{session.status}</span> · Questions detected: {questionCount}
+          Status: <span className="badge">{session.status}</span> · Questions: {questionCount}
+          {session.config?.mode && <span className="badge">{session.config.mode}</span>}
+          {session.config?.tone && <span className="badge">{session.config.tone}</span>}
           {session.config?.company ? ` · ${session.config.company}` : ""}
           {session.config?.role ? ` · ${session.config.role}` : ""}
         </p>
@@ -133,13 +173,13 @@ export function SessionDetailPage() {
 
       {session.status === "completed" && !session.summary && (
         <section className="card">
-          <p className="muted">Summary pending… generating recap.</p>
+          <p className="muted">Summary pending… generating recap (requires worker: npm run dev:worker).</p>
         </section>
       )}
 
       {session.summary && (
         <section className="card grid">
-          <h3>Summary</h3>
+          <h3>Session summary</h3>
           <p>{session.summary.summary}</p>
           <div>
             <h4>Questions</h4>
@@ -160,34 +200,34 @@ export function SessionDetailPage() {
         </section>
       )}
 
-      {qaPairs.length > 0 && (
+      {blocks.length > 0 && (
         <section className="card">
-          <h3>Questions & answers</h3>
-          {qaPairs.map((pair, idx) => (
-            <div key={idx} className="grid" style={{ marginBottom: "1rem" }}>
+          <h3>Conversation</h3>
+          {blocks.map((block, idx) => (
+            <div key={idx} className="grid" style={{ marginBottom: "1.25rem", paddingBottom: "1rem", borderBottom: "1px solid rgba(36,48,86,0.5)" }}>
               <p>
-                <strong>Q:</strong> {pair.question}
+                <strong>Interviewer:</strong> {block.question}
               </p>
-              <pre>{pair.answer || "(no answer recorded)"}</pre>
-            </div>
-          ))}
-        </section>
-      )}
-
-      {session.aiOutputs.length > 0 && qaPairs.length === 0 && (
-        <section className="card">
-          <h3>AI outputs</h3>
-          {session.aiOutputs.map((output, idx) => (
-            <div key={idx} className="grid">
-              <span className="badge">{output.kind}</span>
-              <pre>{output.content}</pre>
+              {block.userAnswer && (
+                <p>
+                  <strong>You:</strong> {block.userAnswer}
+                </p>
+              )}
+              {block.aiSuggestion ? (
+                <div>
+                  <span className="badge">{block.aiKind || "suggestion"}</span>
+                  <pre>{block.aiSuggestion}</pre>
+                </div>
+              ) : (
+                <p className="muted">No AI suggestion recorded for this question.</p>
+              )}
             </div>
           ))}
         </section>
       )}
 
       <section className="card">
-        <h3>Transcript</h3>
+        <h3>Raw transcript</h3>
         {session.transcript.length === 0 ? (
           <p className="muted">No transcript yet.</p>
         ) : (

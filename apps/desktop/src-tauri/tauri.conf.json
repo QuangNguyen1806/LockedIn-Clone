@@ -10,6 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "label": "main",
@@ -26,12 +27,12 @@
         "label": "overlay",
         "title": "LockedIn Overlay",
         "url": "/overlay",
-        "width": 440,
-        "height": 240,
-        "minWidth": 440,
-        "minHeight": 180,
-        "maxWidth": 520,
-        "maxHeight": 280,
+        "width": 580,
+        "height": 420,
+        "minWidth": 520,
+        "minHeight": 320,
+        "maxWidth": 720,
+        "maxHeight": 560,
         "resizable": true,
         "decorations": false,
         "transparent": true,
@@ -62,6 +63,7 @@
     ],
     "macOS": {
       "entitlements": "./Entitlements.plist",
+      "infoPlist": "./Info.plist",
       "signingIdentity": "-"
     }
   }

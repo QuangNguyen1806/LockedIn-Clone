@@ -9,7 +9,7 @@ type Session = {
   createdAt: string;
   startedAt?: string;
   endedAt?: string;
-  config?: { mode?: string; company?: string; role?: string };
+  config?: { mode?: string; company?: string; role?: string; tone?: string };
   questionCount?: number;
 };
 
@@ -132,7 +132,9 @@ export function HistoryPage() {
         <ul className="session-list">
           {filtered.map((session) => {
             const duration = sessionDurationMinutes(session);
-            const meta = [session.config?.company, session.config?.role].filter(Boolean).join(" · ");
+            const meta = [session.config?.company, session.config?.role, session.config?.tone]
+              .filter(Boolean)
+              .join(" · ");
             return (
               <li key={session.id}>
                 <Link to={`/history/${session.id}`}>{session.title}</Link>{" "}

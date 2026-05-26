@@ -3,6 +3,8 @@ from dataclasses import dataclass
 
 from app.config import settings
 from app.services.gemini import GeminiLLMService, gemini_generate_summary, gemini_transcribe_audio
+from app.realtime.transcript_utils import is_valid_transcript
+from app.services.stt_errors import sanitize_stt_error
 
 
 @dataclass
@@ -49,9 +51,18 @@ class GeminiSTTService:
         _sample_rate: int,
         encoding: str = "webm",
     ) -> TranscriptResult | None:
-        mime = "audio/webm" if encoding == "webm" else "audio/wav"
-        text = await gemini_transcribe_audio(audio_b64, mime_type=mime)
-        if not text or len(text) < 3:
+        mime_map = {
+            "webm": "audio/webm",
+            "wav": "audio/wav",
+            "mp4": "audio/mp4",
+            "m4a": "audio/mp4",
+        }
+        mime = mime_map.get(encoding, "audio/webm")
+        try:
+            text = await gemini_transcribe_audio(audio_b64, mime_type=mime)
+        except Exception as exc:
+            raise RuntimeError(sanitize_stt_error(exc)) from exc
+        if not text or len(text) < 3 or not is_valid_transcript(text):
             return None
         return TranscriptResult(text=text, is_final=True, speaker="interviewer")
 
@@ -68,11 +79,22 @@ class DeepgramSTTService:
         import httpx
 
         audio_bytes = base64.b64decode(audio_b64)
-        content_type = "audio/webm" if encoding == "webm" else "audio/wav"
+        content_type = {
+            "webm": "audio/webm",
+            "wav": "audio/wav",
+            "mp4": "audio/mp4",
+            "m4a": "audio/mp4",
+        }.get(encoding, "audio/webm")
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(
                 "https://api.deepgram.com/v1/listen",
-                params={"model": "nova-2", "smart_format": "true"},
+                params={
+                    "model": "nova-2",
+                    "smart_format": "true",
+                    "language": "en-US",
+                    "punctuate": "true",
+                    "filler_words": "false",
+                },
                 headers={
                     "Authorization": f"Token {settings.deepgram_api_key}",
                     "Content-Type": content_type,

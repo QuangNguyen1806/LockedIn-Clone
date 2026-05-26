@@ -1,5 +1,5 @@
+import base64
 import json
-import re
 import uuid
 from datetime import datetime, timezone
 
@@ -12,34 +12,19 @@ from app.auth import decode_token
 from app.database import AsyncSessionLocal
 from app.logging_config import logger
 from app.models import AiOutput, JobQueue, Session, SessionStatus, TranscriptSegment, User
+from app.realtime.transcript_utils import (
+    is_valid_transcript,
+    should_trigger_coaching,
+)
+from app.services.stt_errors import sanitize_stt_error
 from app.services.ai import LLMService, STTService, TranscriptResult
 
 router = APIRouter(tags=["realtime"])
 
 PROMPT_VERSION = "v2"
-MIN_FINAL_CHARS = 8
-
-QUESTION_PATTERNS = (
-    r"\?",
-    r"\bwhat\b",
-    r"\bwhy\b",
-    r"\bhow\b",
-    r"\bwhen\b",
-    r"\bwhere\b",
-    r"\bwho\b",
-    r"\bwhich\b",
-    r"\btell me\b",
-    r"\bdescribe\b",
-    r"\bwalk me\b",
-    r"\bexplain\b",
-    r"\bcan you\b",
-    r"\bcould you\b",
-)
-
-
-def looks_like_question(text: str) -> bool:
-    lowered = text.lower().strip()
-    return any(re.search(pattern, lowered) for pattern in QUESTION_PATTERNS)
+MIN_FINAL_CHARS = 6
+MIN_AUDIO_BYTES = 1024
+UTTERANCE_MIN_BYTES = 4096
 
 
 def build_system_prompt(session: Session) -> str:
@@ -71,6 +56,7 @@ def build_system_prompt(session: Session) -> str:
         "1) A suggested answer they can say aloud in first person.",
         "2) Two or three short bullet talking points.",
         "Be specific, practical, and grounded in the user's context when available.",
+        "Never mention audio files, transcription, or technical limitations.",
         tone_map.get(session.tone, tone_map["conversational"]),
     ]
     if session.mode == "behavioral":
@@ -122,6 +108,7 @@ async def persist_and_emit_transcript(
     db: AsyncSession,
     session_id: str,
     transcript: TranscriptResult,
+    should_coach: bool | None = None,
 ) -> str:
     segment_id = str(uuid.uuid4())
     segment = TranscriptSegment(
@@ -136,17 +123,20 @@ async def persist_and_emit_transcript(
     await db.commit()
 
     event_type = "transcript.final" if transcript.is_final else "transcript.partial"
+    payload: dict = {
+        "segmentId": segment_id,
+        "speaker": transcript.speaker,
+        "text": transcript.text,
+        "isFinal": transcript.is_final,
+        "timestampMs": segment.timestamp_ms,
+    }
+    if transcript.is_final and should_coach is not None:
+        payload["shouldCoach"] = should_coach
     await emit(
         ws,
         event_type,
         session_id,
-        {
-            "segmentId": segment_id,
-            "speaker": transcript.speaker,
-            "text": transcript.text,
-            "isFinal": transcript.is_final,
-            "timestampMs": segment.timestamp_ms,
-        },
+        payload,
     )
     return segment_id
 
@@ -210,20 +200,26 @@ async def enqueue_summarize(db: AsyncSession, session_id: str) -> None:
     db.add(job)
 
 
-async def flush_audio_buffer(
+async def finalize_utterance(
     ws: WebSocket,
     db: AsyncSession,
     session_id: str,
     stt: STTService,
-    audio_buffer: list[str],
+    speech_buffer: list[str],
     encoding: str,
     sample_rate: int,
     process_final_question,
-) -> None:
-    if not audio_buffer:
-        return
-    combined = "".join(audio_buffer)
-    audio_buffer.clear()
+) -> str | None:
+    if not speech_buffer:
+        return None
+    combined = "".join(speech_buffer)
+    speech_buffer.clear()
+    try:
+        audio_bytes = base64.b64decode(combined)
+    except Exception:
+        return None
+    if len(audio_bytes) < UTTERANCE_MIN_BYTES:
+        return None
     try:
         transcript = await stt.transcribe_chunk(combined, sample_rate, encoding=encoding)
     except Exception as exc:
@@ -234,16 +230,68 @@ async def flush_audio_buffer(
             session_id,
             {
                 "code": "STT_ERROR",
-                "message": str(exc),
+                "message": sanitize_stt_error(exc),
                 "recoverable": True,
             },
         )
-        return
-    if not transcript:
-        return
-    await persist_and_emit_transcript(ws, db, session_id, transcript)
-    if transcript.is_final:
-        await process_final_question(transcript.text, speaker=transcript.speaker or "interviewer")
+        return None
+    if not transcript or not is_valid_transcript(transcript.text):
+        return None
+
+    coach = should_trigger_coaching(transcript.text)
+    await emit(
+        ws,
+        "transcript.partial",
+        session_id,
+        {
+            "segmentId": str(uuid.uuid4()),
+            "speaker": transcript.speaker or "interviewer",
+            "text": transcript.text,
+            "isFinal": False,
+            "timestampMs": int(datetime.now(timezone.utc).timestamp() * 1000),
+        },
+    )
+    await persist_and_emit_transcript(
+        ws,
+        db,
+        session_id,
+        transcript,
+        should_coach=coach,
+    )
+    if coach:
+        await emit(
+            ws,
+            "turn.your_turn",
+            session_id,
+            {"question": transcript.text},
+        )
+        await process_final_question(
+            transcript.text,
+            speaker=transcript.speaker or "interviewer",
+        )
+    return transcript.text
+
+
+async def flush_audio_buffer(
+    ws: WebSocket,
+    db: AsyncSession,
+    session_id: str,
+    stt: STTService,
+    speech_buffer: list[str],
+    encoding: str,
+    sample_rate: int,
+    process_final_question,
+) -> None:
+    await finalize_utterance(
+        ws,
+        db,
+        session_id,
+        stt,
+        speech_buffer,
+        encoding,
+        sample_rate,
+        process_final_question,
+    )
 
 
 @router.websocket("/ws/sessions/{session_id}")
@@ -263,7 +311,6 @@ async def session_websocket(websocket: WebSocket, session_id: str):
     coaching_in_progress = False
     pending_question: str | None = None
     audio_buffer: list[str] = []
-    last_partial_question = ""
     last_heard_text = ""
     last_encoding = "webm"
     last_sample_rate = 16000
@@ -310,6 +357,8 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             nonlocal coaching_in_progress, pending_question, last_heard_text
 
             cleaned = question.strip()
+            if not is_valid_transcript(cleaned):
+                return
             last_heard_text = cleaned
             min_chars = MIN_FINAL_CHARS if not forced else 4
             if len(cleaned) < min_chars:
@@ -319,17 +368,17 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                 await append_transcript_line("user", cleaned)
                 return
 
-            if not forced and not looks_like_question(cleaned) and len(cleaned) < 20:
-                await append_transcript_line("interviewer", cleaned)
-                return
-
             await append_transcript_line("interviewer", cleaned)
+
+            if not should_trigger_coaching(cleaned, forced=forced):
+                return
 
             if coaching_in_progress:
                 pending_question = cleaned
                 return
 
             coaching_in_progress = True
+            await emit(websocket, "turn.coaching", session_id, {})
             try:
                 await generate_coaching(
                     websocket, db, session, session_id, cleaned, recent_transcript
@@ -348,6 +397,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                 )
             finally:
                 coaching_in_progress = False
+                await emit(websocket, "turn.listening", session_id, {})
                 if pending_question and pending_question != cleaned:
                     next_question = pending_question
                     pending_question = None
@@ -381,11 +431,26 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                         break
                     if action == "mark_question" and last_heard_text:
                         await process_final_question(last_heard_text, forced=True)
+                        continue
+                    if action == "utterance_end":
+                        heard = await finalize_utterance(
+                            websocket,
+                            db,
+                            session_id,
+                            stt,
+                            audio_buffer,
+                            last_encoding,
+                            last_sample_rate,
+                            process_final_question,
+                        )
+                        if heard:
+                            last_heard_text = heard
+                        continue
                     continue
 
                 if message.get("type") == "transcript":
                     text = (message.get("text") or "").strip()
-                    if not text:
+                    if not text or not is_valid_transcript(text):
                         continue
                     is_final = bool(message.get("isFinal", True))
                     speaker = message.get("speaker") or "interviewer"
@@ -414,45 +479,13 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                 if message.get("type") != "audio":
                     continue
 
+                chunk = message.get("data", "")
+                if not chunk:
+                    continue
                 last_encoding = message.get("encoding", "webm")
                 last_sample_rate = message.get("sampleRate", 16000)
-                audio_buffer.append(message.get("data", ""))
-                if len(audio_buffer) < 1:
-                    continue
-
-                combined = "".join(audio_buffer)
                 audio_buffer.clear()
-
-                try:
-                    transcript = await stt.transcribe_chunk(
-                        combined,
-                        last_sample_rate,
-                        encoding=last_encoding,
-                    )
-                except Exception as exc:
-                    logger.error("stt_failed", session_id=session_id, error=str(exc))
-                    await emit(
-                        websocket,
-                        "error",
-                        session_id,
-                        {
-                            "code": "STT_ERROR",
-                            "message": str(exc),
-                            "recoverable": True,
-                        },
-                    )
-                    continue
-
-                if not transcript:
-                    continue
-
-                last_heard_text = transcript.text
-                await persist_and_emit_transcript(websocket, db, session_id, transcript)
-                if transcript.is_final:
-                    await process_final_question(
-                        transcript.text,
-                        speaker=transcript.speaker or "interviewer",
-                    )
+                audio_buffer.append(chunk)
 
         except WebSocketDisconnect:
             logger.info("websocket_disconnected", session_id=session_id)

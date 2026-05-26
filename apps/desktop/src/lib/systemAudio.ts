@@ -5,6 +5,9 @@ type DisplayMediaWithSystemAudio = DisplayMediaStreamOptions & {
   surfaceSwitching?: "include";
 };
 
+const MACOS_SYSTEM_AUDIO_HELP =
+  "macOS desktop apps cannot capture call/system audio reliably. Use Microphone mode and point your mic at the call (or use speakers).";
+
 function waitForAudioTrack(stream: MediaStream, timeoutMs = 4000): Promise<boolean> {
   if (stream.getAudioTracks().length > 0) {
     return Promise.resolve(true);
@@ -86,8 +89,46 @@ async function tryCaptureSystemAudio(): Promise<MediaStream | null> {
   return null;
 }
 
+export function isMacOsTauri(): boolean {
+  return navigator.userAgent.includes("Macintosh") && "__TAURI_INTERNALS__" in window;
+}
+
+export function isTauriDesktop(): boolean {
+  return "__TAURI_INTERNALS__" in window;
+}
+
+/** getDisplayMedia exists (may still lack audio on macOS WebKit). */
+export function hasDisplayMediaApi(): boolean {
+  return typeof navigator.mediaDevices?.getDisplayMedia === "function";
+}
+
+/** System/call audio is viable on this platform (false on macOS desktop app). */
+export function isSystemAudioSupportedOnPlatform(): boolean {
+  if (isMacOsTauri()) return false;
+  return hasDisplayMediaApi();
+}
+
+export function defaultAudioInputMode(): "mic" | "system" {
+  return isSystemAudioSupportedOnPlatform() ? "system" : "mic";
+}
+
+export function macOsSystemAudioHelpText(): string {
+  return MACOS_SYSTEM_AUDIO_HELP;
+}
+
+export function normalizeAudioInput(input: "mic" | "system" | "both"): "mic" | "system" | "both" {
+  if (!isSystemAudioSupportedOnPlatform() && (input === "system" || input === "both")) {
+    return "mic";
+  }
+  return input;
+}
+
 export async function requestSystemAudioStream(): Promise<MediaStream> {
-  if (typeof navigator.mediaDevices?.getDisplayMedia !== "function") {
+  if (!isSystemAudioSupportedOnPlatform()) {
+    throw new Error(MACOS_SYSTEM_AUDIO_HELP);
+  }
+
+  if (!hasDisplayMediaApi()) {
     throw new Error("System audio capture is not supported in this environment.");
   }
 
@@ -97,7 +138,7 @@ export async function requestSystemAudioStream(): Promise<MediaStream> {
   }
 
   throw new Error(
-    "macOS did not provide a system-audio track for this screen share. This is a known WebKit limitation in desktop apps. Use “Microphone only” in Live Coach (or point your mic at the call), and confirm LockedIn Copilot is allowed under System Settings → Privacy & Security → Screen & System Audio Recording.",
+    `${MACOS_SYSTEM_AUDIO_HELP} If you tried screen share, confirm LockedIn Copilot is allowed under System Settings → Privacy & Security → Screen & System Audio Recording.`,
   );
 }
 
@@ -107,24 +148,7 @@ export function formatSystemAudioError(err: unknown): string {
     return "Screen share must be started by clicking Start coaching. Try again with that button.";
   }
   if (message.toLowerCase().includes("not allowed") || message.toLowerCase().includes("permission")) {
-    return 'Screen recording access denied. Open System Settings → Privacy & Security → Screen & System Audio Recording, allow LockedIn Copilot, then restart the app.';
+    return "Screen recording access denied. Open System Settings → Privacy & Security → Screen & System Audio Recording, allow LockedIn Copilot, then restart the app.";
   }
   return message;
-}
-
-export function isMacOsTauri(): boolean {
-  return navigator.userAgent.includes("Macintosh") && "__TAURI_INTERNALS__" in window;
-}
-
-export function isTauriDesktop(): boolean {
-  return "__TAURI_INTERNALS__" in window;
-}
-
-export function isSystemAudioSupported(): boolean {
-  return typeof navigator.mediaDevices?.getDisplayMedia === "function";
-}
-
-export function defaultAudioInputMode(): "mic" | "system" {
-  if (isMacOsTauri()) return "mic";
-  return isSystemAudioSupported() ? "system" : "mic";
 }
