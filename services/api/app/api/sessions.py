@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
@@ -8,7 +8,7 @@ from sqlalchemy.orm import selectinload
 
 from app.deps import get_current_user
 from app.database import get_db
-from app.models import AiOutput, JobQueue, Session, SessionStatus, SessionSummary, TranscriptSegment, User
+from app.models import AiOutput, Document, JobQueue, Session, SessionStatus, SessionSummary, TranscriptSegment, User
 from app.schemas import (
     AiOutputResponse,
     CreateSessionRequest,
@@ -18,6 +18,7 @@ from app.schemas import (
     SessionResponse,
     SessionSummaryResponse,
     TranscriptSegmentResponse,
+    UpdateSessionRequest,
 )
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -41,12 +42,24 @@ def session_to_response(session: Session) -> SessionResponse:
         userId=session.user_id,
         title=session.title,
         status=session.status,
+        strategy=session.strategy or "live_answer",
         config=session_config(session),
         startedAt=session.started_at,
         endedAt=session.ended_at,
         createdAt=session.created_at,
         updatedAt=session.updated_at,
     )
+
+
+async def latest_document_text(db: AsyncSession, user_id: str, kind: str) -> str | None:
+    result = await db.execute(
+        select(Document)
+        .where(Document.user_id == user_id, Document.kind == kind, Document.parsed_text.isnot(None))
+        .order_by(Document.created_at.desc())
+        .limit(1)
+    )
+    doc = result.scalar_one_or_none()
+    return doc.parsed_text if doc else None
 
 
 @router.get("", response_model=list[SessionResponse])
@@ -63,6 +76,13 @@ async def create_session(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    resume_context = body.config.resumeContext
+    job_description_context = body.config.jobDescriptionContext
+    if not resume_context:
+        resume_context = await latest_document_text(db, user.id, "resume")
+    if not job_description_context:
+        job_description_context = await latest_document_text(db, user.id, "job_description")
+
     session = Session(
         user_id=user.id,
         title=body.title,
@@ -72,8 +92,9 @@ async def create_session(
         role=body.config.role,
         tone=body.config.tone,
         custom_instructions=body.config.customInstructions,
-        resume_context=body.config.resumeContext,
-        job_description_context=body.config.jobDescriptionContext,
+        resume_context=resume_context,
+        job_description_context=job_description_context,
+        strategy=body.strategy or "live_answer",
     )
     db.add(session)
     await db.commit()
@@ -99,13 +120,49 @@ async def session_metrics(user: User = Depends(get_current_user), db: AsyncSessi
         )
     ).scalars().all()
     duration_minutes = 0
+    durations: list[int] = []
     for s in sessions:
         if s.started_at and s.ended_at:
-            duration_minutes += int((s.ended_at - s.started_at).total_seconds() // 60)
+            minutes = int((s.ended_at - s.started_at).total_seconds() // 60)
+            duration_minutes += minutes
+            durations.append(minutes)
+
+    question_count = await db.scalar(
+        select(func.count())
+        .select_from(AiOutput)
+        .join(Session, AiOutput.session_id == Session.id)
+        .where(Session.user_id == user.id, AiOutput.kind == "suggestion")
+    )
+
+    now = datetime.now(timezone.utc)
+    sessions_by_week: list[dict] = []
+    for week_offset in range(4):
+        week_start = now - timedelta(days=7 * (week_offset + 1))
+        week_end = now - timedelta(days=7 * week_offset)
+        count = await db.scalar(
+            select(func.count())
+            .select_from(Session)
+            .where(
+                Session.user_id == user.id,
+                Session.created_at >= week_start,
+                Session.created_at < week_end,
+            )
+        )
+        sessions_by_week.append(
+            {
+                "weekStart": week_start.date().isoformat(),
+                "count": count or 0,
+            }
+        )
+
+    avg_duration = round(sum(durations) / len(durations), 1) if durations else 0
     return MetricsResponse(
         totalSessions=total or 0,
         completedSessions=completed or 0,
         totalDurationMinutes=duration_minutes,
+        sessionsByWeek=list(reversed(sessions_by_week)),
+        avgDuration=avg_duration,
+        questionsAnswered=question_count or 0,
     )
 
 
@@ -169,6 +226,34 @@ async def get_session(
     )
 
 
+@router.patch("/{session_id}", response_model=SessionResponse)
+async def update_session(
+    session_id: str,
+    body: UpdateSessionRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Session).where(Session.id == session_id, Session.user_id == user.id)
+    )
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if body.mode is not None:
+        session.mode = body.mode
+    if body.tone is not None:
+        session.tone = body.tone
+    if body.customInstructions is not None:
+        session.custom_instructions = body.customInstructions
+    if body.company is not None:
+        session.company = body.company
+    if body.role is not None:
+        session.role = body.role
+    await db.commit()
+    await db.refresh(session)
+    return session_to_response(session)
+
+
 @router.post("/{session_id}/start", response_model=SessionResponse)
 async def start_session(
     session_id: str,
@@ -195,19 +280,21 @@ async def end_session(
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
-        select(Session).where(Session.id == session_id, Session.user_id == user.id)
+        select(Session)
+        .options(selectinload(Session.transcript_segments), selectinload(Session.ai_outputs))
+        .where(Session.id == session_id, Session.user_id == user.id)
     )
     session = result.scalar_one_or_none()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     session.status = SessionStatus.completed.value
     session.ended_at = datetime.now(timezone.utc)
-    job = JobQueue(
-        job_type="summarize_session",
-        payload_json=json.dumps({"session_id": session.id}),
-        status="pending",
-    )
-    db.add(job)
+    if user.delete_data_on_session_end:
+        for segment in list(session.transcript_segments):
+            await db.delete(segment)
+        for output in list(session.ai_outputs):
+            await db.delete(output)
+    await enqueue_summarize(db, session.id)
     await db.commit()
     await db.refresh(session)
     return session_to_response(session)
@@ -228,3 +315,12 @@ async def delete_session(
     await db.delete(session)
     await db.commit()
     return {"ok": True}
+
+
+async def enqueue_summarize(db: AsyncSession, session_id: str) -> None:
+    job = JobQueue(
+        job_type="summarize_session",
+        payload_json=json.dumps({"session_id": session_id}),
+        status="pending",
+    )
+    db.add(job)

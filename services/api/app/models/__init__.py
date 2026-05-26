@@ -24,6 +24,11 @@ class SessionMode(str, Enum):
     technical = "technical"
 
 
+class SessionStrategy(str, Enum):
+    live_answer = "live_answer"
+    critique = "critique"
+
+
 class SessionStatus(str, Enum):
     draft = "draft"
     active = "active"
@@ -67,6 +72,7 @@ class User(Base):
 
     sessions: Mapped[list["Session"]] = relationship(back_populates="user")
     documents: Mapped[list["Document"]] = relationship(back_populates="user")
+    presets: Mapped[list["SessionPreset"]] = relationship(back_populates="user")
 
 
 class Session(Base):
@@ -83,6 +89,7 @@ class Session(Base):
     custom_instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
     resume_context: Mapped[str | None] = mapped_column(Text, nullable=True)
     job_description_context: Mapped[str | None] = mapped_column(Text, nullable=True)
+    strategy: Mapped[str] = mapped_column(String(32), default=SessionStrategy.live_answer.value)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -167,3 +174,33 @@ class JobQueue(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class SessionPreset(Base):
+    __tablename__ = "session_presets"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(255))
+    is_favorite: Mapped[bool] = mapped_column(Boolean, default=False)
+    mode: Mapped[str] = mapped_column(String(32), default=SessionMode.behavioral.value)
+    tone: Mapped[str] = mapped_column(String(32), default=ToneStyle.conversational.value)
+    company: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    role: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    custom_instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    user: Mapped["User"] = relationship(back_populates="presets")
+
+
+class PracticeQuestion(Base):
+    __tablename__ = "practice_questions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    topic: Mapped[str] = mapped_column(String(255))
+    difficulty: Mapped[str] = mapped_column(String(32), default="medium")
+    text: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

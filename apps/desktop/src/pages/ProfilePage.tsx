@@ -5,6 +5,7 @@ type Profile = {
   displayName: string;
   headline?: string;
   skills: string[];
+  deleteDataOnSessionEnd?: boolean;
 };
 
 type Document = {
@@ -41,6 +42,7 @@ export function ProfilePage() {
         displayName: profile.displayName,
         headline: profile.headline,
         skills: skillsText.split(",").map((s) => s.trim()).filter(Boolean),
+        deleteDataOnSessionEnd: profile.deleteDataOnSessionEnd,
       })) as Profile;
       setProfile(updated);
       setMessage("Profile saved.");
@@ -59,6 +61,18 @@ export function ProfilePage() {
       setMessage(`${kind} uploaded.`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Upload failed");
+    }
+  }
+
+  async function retryParse(documentId: string) {
+    setError("");
+    try {
+      await api.reparseDocument(documentId);
+      const docs = (await api.listDocuments()) as Document[];
+      setDocuments(docs);
+      setMessage("Document queued for parsing.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Retry failed");
     }
   }
 
@@ -89,6 +103,14 @@ export function ProfilePage() {
             <label htmlFor="skills">Skills</label>
             <input id="skills" value={skillsText} onChange={(e) => setSkillsText(e.target.value)} />
           </div>
+          <label className="controls">
+            <input
+              type="checkbox"
+              checked={Boolean(profile.deleteDataOnSessionEnd)}
+              onChange={(e) => setProfile({ ...profile, deleteDataOnSessionEnd: e.target.checked })}
+            />
+            Delete transcript data when a session ends
+          </label>
           {message && <p className="muted">{message}</p>}
           {error && <p className="error">{error}</p>}
           <button type="submit" className="primary">
@@ -111,9 +133,15 @@ export function ProfilePage() {
             <li key={doc.id}>
               {doc.filename} <span className="badge">{doc.kind}</span>{" "}
               <span className="badge">{doc.parseStatus}</span>
+              {doc.parseStatus === "failed" && (
+                <button type="button" className="secondary" onClick={() => void retryParse(doc.id)}>
+                  Retry parse
+                </button>
+              )}
             </li>
           ))}
         </ul>
+        <p className="hint">Parsing runs in the background worker. Start it with: npm run dev:worker</p>
       </section>
     </div>
   );

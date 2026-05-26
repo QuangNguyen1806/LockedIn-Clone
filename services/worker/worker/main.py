@@ -104,6 +104,7 @@ def generate_summary(transcript: str) -> dict:
 
 
 def process_parse_document(db: Session, payload: dict) -> None:
+    from app.config import resolve_storage_path
     from app.models import Document
 
     doc_id = payload["document_id"]
@@ -113,7 +114,10 @@ def process_parse_document(db: Session, payload: dict) -> None:
     doc.parse_status = "processing"
     db.commit()
     try:
-        text = parse_document_text(doc.storage_path)
+        storage_path = resolve_storage_path(doc.storage_path)
+        if not storage_path.exists():
+            raise FileNotFoundError(f"File not found: {storage_path}")
+        text = parse_document_text(str(storage_path))
         doc.parsed_text = text[:50000]
         doc.parse_status = "completed"
 

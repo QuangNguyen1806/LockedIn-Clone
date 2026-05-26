@@ -1,16 +1,47 @@
-import { FormEvent, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { FormEvent, useEffect, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../lib/api";
+
+type Preset = {
+  id: string;
+  name: string;
+  mode: string;
+  tone: string;
+  company?: string;
+  role?: string;
+  customInstructions?: string;
+};
 
 export function NewSessionPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [title, setTitle] = useState("Practice interview");
   const [mode, setMode] = useState("behavioral");
   const [company, setCompany] = useState("");
   const [role, setRole] = useState("");
   const [tone, setTone] = useState("conversational");
   const [customInstructions, setCustomInstructions] = useState("");
+  const [presets, setPresets] = useState<Preset[]>([]);
+  const [presetId, setPresetId] = useState(searchParams.get("preset") || "");
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    api
+      .listPresets()
+      .then((list) => setPresets(list as Preset[]))
+      .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    const selected = presets.find((preset) => preset.id === presetId);
+    if (!selected) return;
+    setTitle(selected.name);
+    setMode(selected.mode);
+    setTone(selected.tone);
+    setCompany(selected.company || "");
+    setRole(selected.role || "");
+    setCustomInstructions(selected.customInstructions || "");
+  }, [presetId, presets]);
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -30,6 +61,19 @@ export function NewSessionPage() {
     <div className="card">
       <h2>New session</h2>
       <form onSubmit={onSubmit} className="grid">
+        {presets.length > 0 && (
+          <div>
+            <label htmlFor="preset">Start from preset</label>
+            <select id="preset" value={presetId} onChange={(e) => setPresetId(e.target.value)}>
+              <option value="">Custom session</option>
+              {presets.map((preset) => (
+                <option key={preset.id} value={preset.id}>
+                  {preset.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
         <div>
           <label htmlFor="title">Title</label>
           <input id="title" value={title} onChange={(e) => setTitle(e.target.value)} required />

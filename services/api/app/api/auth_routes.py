@@ -36,6 +36,7 @@ def user_to_response(user: User) -> UserProfileResponse:
         displayName=user.display_name,
         headline=user.headline,
         skills=skills,
+        deleteDataOnSessionEnd=user.delete_data_on_session_end,
         createdAt=user.created_at,
     )
 
@@ -54,6 +55,9 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
     db.add(user)
     await db.commit()
     await db.refresh(user)
+    from app.services.seed import seed_user_presets
+
+    await seed_user_presets(user)
     token = create_access_token(user.id)
     return AuthResponse(accessToken=token, user=user_to_response(user))
 

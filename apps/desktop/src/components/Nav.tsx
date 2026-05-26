@@ -4,7 +4,9 @@ import { clearStoredToken } from "../lib/api";
 const links = [
   { to: "/", label: "Home" },
   { to: "/profile", label: "Profile" },
+  { to: "/presets", label: "Presets" },
   { to: "/sessions/new", label: "New Session" },
+  { to: "/practice", label: "Practice" },
   { to: "/history", label: "History" },
   { to: "/coach", label: "Live Coach" },
 ];
@@ -31,7 +33,7 @@ export function Nav() {
       </nav>
       <div className="sidebar-footer">
         <p className="hint">Tray icon: click to show/hide</p>
-        <p className="hint">⌘⇧Q quit · ⌘⇧W hide</p>
+        <p className="hint">⌘Q quit · ⌘⇧W hide</p>
         <button
           className="secondary"
           onClick={() => {

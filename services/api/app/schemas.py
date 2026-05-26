@@ -30,6 +30,7 @@ class UserProfileResponse(BaseModel):
     displayName: str
     headline: str | None = None
     skills: list[str] = []
+    deleteDataOnSessionEnd: bool = False
     createdAt: datetime
 
 
@@ -49,6 +50,15 @@ class UpdateProfileRequest(BaseModel):
 class CreateSessionRequest(BaseModel):
     title: str
     config: SessionConfigSchema
+    strategy: str = "live_answer"
+
+
+class UpdateSessionRequest(BaseModel):
+    mode: str | None = None
+    tone: str | None = None
+    customInstructions: str | None = None
+    company: str | None = None
+    role: str | None = None
 
 
 class SessionResponse(BaseModel):
@@ -56,6 +66,7 @@ class SessionResponse(BaseModel):
     userId: str
     title: str
     status: str
+    strategy: str = "live_answer"
     config: SessionConfigSchema
     startedAt: datetime | None = None
     endedAt: datetime | None = None
@@ -112,3 +123,48 @@ class MetricsResponse(BaseModel):
     totalSessions: int
     completedSessions: int
     totalDurationMinutes: int
+    sessionsByWeek: list[dict] = []
+    avgDuration: float = 0
+    questionsAnswered: int = 0
+
+
+class PresetResponse(BaseModel):
+    id: str
+    userId: str
+    name: str
+    isFavorite: bool
+    mode: str
+    tone: str
+    company: str | None = None
+    role: str | None = None
+    customInstructions: str | None = None
+    createdAt: datetime
+    updatedAt: datetime
+
+
+class CreatePresetRequest(BaseModel):
+    name: str
+    isFavorite: bool = False
+    mode: str = "behavioral"
+    tone: str = "conversational"
+    company: str | None = None
+    role: str | None = None
+    customInstructions: str | None = None
+
+
+class UpdatePresetRequest(BaseModel):
+    name: str | None = None
+    isFavorite: bool | None = None
+    mode: str | None = None
+    tone: str | None = None
+    company: str | None = None
+    role: str | None = None
+    customInstructions: str | None = None
+
+
+class PracticeQuestionResponse(BaseModel):
+    id: str
+    topic: str
+    difficulty: str
+    text: str
+    createdAt: datetime

@@ -43,9 +43,16 @@ export interface ClientAudioMessage {
   sampleRate: number;
 }
 
-export interface ClientControlMessage {
-  type: "control";
-  action: "start" | "stop" | "pause" | "resume";
+export interface ClientTranscriptMessage {
+  type: "transcript";
+  text: string;
+  isFinal: boolean;
+  speaker: "user" | "interviewer" | "unknown";
 }
 
-export type ClientMessage = ClientAudioMessage | ClientControlMessage;
+export interface ClientControlMessage {
+  type: "control";
+  action: "start" | "stop" | "pause" | "resume" | "mark_question";
+}
+
+export type ClientMessage = ClientAudioMessage | ClientTranscriptMessage | ClientControlMessage;

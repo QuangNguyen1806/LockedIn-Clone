@@ -46,7 +46,7 @@ Everything is in the desktop app — register, create sessions, live coach, and 
 
 - **Click tray icon** — show/hide app
 - **⌘⇧W** — hide to tray
-- **⌘⇧Q** — quit
+- **⌘Q** — quit
 - **⌘⇧I** — disable click-through (overlay mode)
 - **Close window (✕)** — hides to tray (does not quit)
 

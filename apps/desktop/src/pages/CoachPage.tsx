@@ -2,15 +2,22 @@ import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api, getStoredToken } from "../lib/api";
-import {
-  AudioInputMode,
-  isSystemAudioSupported,
-  useRealtimeSession,
-} from "../hooks/useSession";
+import { useCoachState } from "../hooks/useCoachState";
 import { requestMicrophonePermission, PermissionState } from "../lib/permissions";
-import { useWindowControls } from "../hooks/useWindowControls";
+import { AudioInputMode } from "../stores/coachTypes";
+import {
+  isSystemAudioSupported,
+  prepareCoachCapture,
+  startCoachSession,
+  stopCoachSession,
+} from "../stores/sessionStore";
 
-type Session = { id: string; title: string; status: string };
+type Session = {
+  id: string;
+  title: string;
+  status: string;
+  config?: { mode?: string; company?: string };
+};
 
 function listeningHint(mode: string, audioInput: AudioInputMode) {
   if (mode === "system") return "Listening to call/system audio from your screen share";
@@ -29,14 +36,13 @@ export function CoachPage() {
   const [audioInput, setAudioInput] = useState<AudioInputMode>(
     isSystemAudioSupported() ? "system" : "mic",
   );
-  const [active, setActive] = useState(false);
-  const [overlayMode, setOverlayMode] = useState(false);
   const [micPermission, setMicPermission] = useState<PermissionState>("unknown");
   const [permissionMessage, setPermissionMessage] = useState("");
   const [startError, setStartError] = useState("");
-  const { opacity, setOpacity, clickThrough, toggleClickThrough } = useWindowControls();
-  const { connectionState, transcript, suggestion, error, listeningMode, prepareCapture, disconnect } =
-    useRealtimeSession(sessionId, token, active, audioInput);
+  const [showMicFallback, setShowMicFallback] = useState(false);
+  const [showDebug, setShowDebug] = useState(false);
+  const coach = useCoachState();
+  const active = coach.fsmState !== "idle" && coach.fsmState !== "ended";
 
   useEffect(() => {
     if (token) {
@@ -54,7 +60,9 @@ export function CoachPage() {
     const result = await requestMicrophonePermission();
     setMicPermission(result);
     if (result === "granted") {
-      setPermissionMessage("Microphone enabled. LockedIn Copilot should now appear in System Settings → Privacy & Security → Microphone.");
+      setPermissionMessage(
+        "Microphone enabled. LockedIn Copilot should now appear in System Settings → Privacy & Security → Microphone.",
+      );
     } else if (result === "denied") {
       setPermissionMessage(
         "Microphone access denied. Open System Settings → Privacy & Security → Microphone, allow LockedIn Copilot, then restart the app.",
@@ -64,33 +72,47 @@ export function CoachPage() {
     }
   }
 
-  async function setOverlay(enabled: boolean) {
-    try {
-      await invoke("set_overlay_mode", { enabled });
-      setOverlayMode(enabled);
-    } catch {
-      setOverlayMode(enabled);
-    }
-  }
-
-  async function handleStartCoaching() {
+  async function handleStartCoaching(nextAudioInput: AudioInputMode = audioInput) {
     setStartError("");
+    setShowMicFallback(false);
+    const selected = sessions.find((s) => s.id === sessionId);
+    if (!selected) {
+      setStartError("Select a session first.");
+      return;
+    }
     try {
-      await prepareCapture();
-      setActive(true);
+      await prepareCoachCapture(nextAudioInput);
+      await invoke("show_overlay");
+      await startCoachSession({
+        sessionId: selected.id,
+        sessionTitle: selected.title,
+        sessionMode: selected.config?.mode || "",
+        sessionCompany: selected.config?.company || "",
+        audioInput: nextAudioInput,
+      });
     } catch (err) {
-      setStartError(err instanceof Error ? err.message : "Could not start audio capture.");
+      const message = err instanceof Error ? err.message : "Could not start audio capture.";
+      setStartError(message);
+      setShowMicFallback(nextAudioInput !== "mic");
+      try {
+        await invoke("hide_overlay");
+      } catch {
+        // ignore
+      }
     }
   }
 
-  function handleStop() {
-    setActive(false);
-    disconnect();
+  async function handleStop() {
+    await stopCoachSession();
+    try {
+      await invoke("hide_overlay");
+    } catch {
+      // browser dev fallback
+    }
   }
 
   async function handleHide() {
-    handleStop();
-    if (overlayMode) await setOverlay(false);
+    await handleStop();
     try {
       await invoke("hide_window");
     } catch {
@@ -99,7 +121,7 @@ export function CoachPage() {
   }
 
   return (
-    <div className={`coach-page ${overlayMode ? "overlay-mode" : ""}`} style={overlayMode ? { opacity } : undefined}>
+    <div className="coach-page">
       <section className="card">
         <div className="coach-header">
           <h2>Live Coach</h2>
@@ -107,20 +129,11 @@ export function CoachPage() {
             <button type="button" className="secondary" onClick={() => void handleHide()}>
               Hide to tray
             </button>
-            {!overlayMode ? (
-              <button type="button" className="primary" onClick={() => void setOverlay(true)}>
-                Overlay mode
-              </button>
-            ) : (
-              <button type="button" className="secondary" onClick={() => void setOverlay(false)}>
-                Exit overlay
-              </button>
-            )}
           </div>
         </div>
         <p className="muted">
-          Capture interview questions from your video call, then get real-time answers grounded in your resume and
-          job description (upload both in Profile first).
+          Start coaching to open the overlay window. Capture interview questions from your video call and get
+          real-time answers grounded in your resume and job description.
         </p>
       </section>
 
@@ -157,15 +170,23 @@ export function CoachPage() {
               Start coaching
             </button>
           ) : (
-            <button onClick={handleStop}>Stop coaching</button>
+            <button onClick={() => void handleStop()}>Stop coaching</button>
           )}
-          <span className="badge">{connectionState}</span>
+          <span className="badge">{coach.connectionState}</span>
+          <span className="badge">{coach.fsmState}</span>
         </div>
         {audioInput !== "mic" && (
           <p className="hint">
-            Call audio uses <strong>Screen & System Audio Recording</strong>, not Microphone. When prompted,
-            share your entire screen with <strong>Share system audio</strong> enabled.
+            On macOS, call-audio capture is unreliable in desktop apps. If screen share succeeds but audio
+            fails, use <strong>Microphone only</strong> and point your mic at the call (or use speakers).
           </p>
+        )}
+        {showMicFallback && (
+          <div className="controls">
+            <button type="button" className="primary" onClick={() => void handleStartCoaching("mic")}>
+              Start with microphone instead
+            </button>
+          </div>
         )}
       </section>
 
@@ -184,41 +205,39 @@ export function CoachPage() {
         {permissionMessage && <p className="muted">{permissionMessage}</p>}
       </section>
 
-      {overlayMode && (
-        <section className="card grid">
-          <h3>Overlay controls</h3>
-          <label>
-            Opacity
-            <input
-              type="range"
-              min={0.4}
-              max={1}
-              step={0.05}
-              value={opacity}
-              onChange={(e) => setOpacity(Number(e.target.value))}
-            />
-          </label>
-          <button onClick={() => void toggleClickThrough()}>
-            Click-through: {clickThrough ? "On" : "Off"}
+      <section className="card">
+        <div className="coach-header">
+          <h3>Live status</h3>
+          <button type="button" className="secondary" onClick={() => setShowDebug((v) => !v)}>
+            {showDebug ? "Hide debug" : "Show debug transcript"}
           </button>
-          <p className="hint">
-            If click-through locks you out: ⌘⇧I to interact, ⌘⇧L to toggle, ⌘⇧W to hide, ⌘⇧Q to quit.
+        </div>
+        <p className="hint">{listeningHint(coach.listeningMode, audioInput)}</p>
+        {coach.currentQuestion && (
+          <p>
+            <strong>Latest question:</strong> {coach.currentQuestion}
           </p>
-        </section>
-      )}
-
-      <section className="card">
-        <h3>Live transcript</h3>
-        <p className="hint">{listeningHint(listeningMode, audioInput)}</p>
-        <pre>{transcript || "Interviewer questions will appear here..."}</pre>
+        )}
+        {coach.queuedQuestion && <p className="hint">Next question detected — queued</p>}
+        {showDebug && (
+          <div className="grid">
+            {coach.transcriptHistory.length === 0 ? (
+              <pre className="muted">No Q/A pairs yet.</pre>
+            ) : (
+              coach.transcriptHistory.map((pair, idx) => (
+                <div key={idx}>
+                  <p>
+                    <strong>Q:</strong> {pair.question}
+                  </p>
+                  <pre>{pair.answer || "(pending answer)"}</pre>
+                </div>
+              ))
+            )}
+          </div>
+        )}
       </section>
 
-      <section className="card">
-        <h3>Coaching answer</h3>
-        <pre>{suggestion || "Suggested answers appear here."}</pre>
-      </section>
-
-      {(error || startError) && <p className="error">{error || startError}</p>}
+      {(coach.error || startError) && <p className="error">{coach.error || startError}</p>}
     </div>
   );
 }

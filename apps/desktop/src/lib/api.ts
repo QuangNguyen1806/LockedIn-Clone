@@ -62,10 +62,26 @@ export const api = {
     request("/api/sessions", { method: "POST", body: JSON.stringify(body) }),
   endSession: (id: string) => request(`/api/sessions/${id}/end`, { method: "POST" }),
   metrics: () =>
-    request<{ totalSessions: number; completedSessions: number; totalDurationMinutes: number }>(
-      "/api/sessions/metrics",
-    ),
+    request<{
+      totalSessions: number;
+      completedSessions: number;
+      totalDurationMinutes: number;
+      sessionsByWeek: Array<{ weekStart: string; count: number }>;
+      avgDuration: number;
+      questionsAnswered: number;
+    }>("/api/sessions/metrics"),
+  updateSession: (id: string, body: Record<string, unknown>) =>
+    request(`/api/sessions/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deleteSession: (id: string) => request(`/api/sessions/${id}`, { method: "DELETE" }),
+  listPresets: () => request<Array<Record<string, unknown>>>("/api/presets"),
+  createPreset: (body: Record<string, unknown>) =>
+    request("/api/presets", { method: "POST", body: JSON.stringify(body) }),
+  updatePreset: (id: string, body: Record<string, unknown>) =>
+    request(`/api/presets/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deletePreset: (id: string) => request(`/api/presets/${id}`, { method: "DELETE" }),
+  listPracticeQuestions: () => request<Array<Record<string, unknown>>>("/api/practice/questions"),
   listDocuments: () => request<Array<Record<string, unknown>>>("/api/documents"),
+  reparseDocument: (id: string) => request(`/api/documents/${id}/reparse`, { method: "POST" }),
   uploadDocument: (kind: string, file: File) => {
     const form = new FormData();
     form.append("kind", kind);

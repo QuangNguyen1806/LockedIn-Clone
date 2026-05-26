@@ -4,12 +4,13 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import decode_token
 from app.database import AsyncSessionLocal
 from app.logging_config import logger
-from app.models import AiOutput, Session, SessionStatus, TranscriptSegment
+from app.models import AiOutput, JobQueue, Session, SessionStatus, TranscriptSegment, User
 from app.services.ai import LLMService, STTService, TranscriptResult
 
 router = APIRouter(tags=["realtime"])
@@ -18,7 +19,33 @@ PROMPT_VERSION = "v2"
 MIN_FINAL_CHARS = 8
 
 
+MIN_FINAL_CHARS = 8
+QUESTION_HINTS = ("?", "what", "why", "how", "tell me", "describe", "walk me", "explain")
+
+
+def looks_like_question(text: str) -> bool:
+    lowered = text.lower().strip()
+    return any(hint in lowered for hint in QUESTION_HINTS)
+
+
 def build_system_prompt(session: Session) -> str:
+    if session.strategy == "critique":
+        parts = [
+            "You are a real-time interview practice coach.",
+            "Evaluate the user's spoken answer to the practice question.",
+            "Respond with concise feedback bullets covering clarity, structure, and impact.",
+            "Be constructive and specific.",
+        ]
+        tone_map = {
+            "concise": "Keep feedback brief.",
+            "conversational": "Use a supportive conversational tone.",
+            "star": "Evaluate STAR structure explicitly.",
+        }
+        parts.append(tone_map.get(session.tone, tone_map["conversational"]))
+        if session.custom_instructions:
+            parts.append(f"Practice context: {session.custom_instructions}")
+        return "\n".join(parts)
+
     tone_map = {
         "concise": "Keep answers brief and direct, under 120 words.",
         "conversational": "Use a natural, conversational tone.",
@@ -60,6 +87,8 @@ def build_user_prompt(session: Session, latest_question: str, recent_lines: list
     if session.job_description_context:
         parts.extend(["", "Job description:", session.job_description_context[:2000]])
     parts.append("\nProvide the suggested spoken answer now.")
+    if session.strategy == "critique":
+        parts[-1] = "\nProvide critique feedback bullets now."
     return "\n".join(parts)
 
 
@@ -135,10 +164,11 @@ async def generate_coaching(
         )
 
     final_content = "".join(content_parts)
+    output_kind = "critique" if session.strategy == "critique" else "suggestion"
     ai_output = AiOutput(
         id=output_id,
         session_id=session_id,
-        kind="suggestion",
+        kind=output_kind,
         content=final_content,
         prompt_version=PROMPT_VERSION,
     )
@@ -174,10 +204,17 @@ async def session_websocket(websocket: WebSocket, session_id: str):
     coaching_in_progress = False
     pending_question: str | None = None
     audio_buffer: list[str] = []
+    last_partial_question = ""
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(
-            select(Session).where(Session.id == session_id, Session.user_id == user_id)
+            select(Session)
+            .options(
+                selectinload(Session.user),
+                selectinload(Session.transcript_segments),
+                selectinload(Session.ai_outputs),
+            )
+            .where(Session.id == session_id, Session.user_id == user_id)
         )
         session = result.scalar_one_or_none()
         if not session:
@@ -197,11 +234,14 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
         await emit(websocket, "session.started", session_id, {"status": "active"})
 
-        async def process_final_question(question: str) -> None:
+        async def process_final_question(question: str, forced: bool = False) -> None:
             nonlocal coaching_in_progress, pending_question, recent_transcript
 
             cleaned = question.strip()
-            if len(cleaned) < MIN_FINAL_CHARS:
+            min_chars = MIN_FINAL_CHARS if not forced else 4
+            if len(cleaned) < min_chars:
+                return
+            if not forced and not looks_like_question(cleaned) and len(cleaned) < 20:
                 return
 
             recent_transcript.append(f"interviewer: {cleaned}")
@@ -251,9 +291,22 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                     if action == "stop":
                         session.status = SessionStatus.completed.value
                         session.ended_at = datetime.now(timezone.utc)
+                        job = JobQueue(
+                            job_type="summarize_session",
+                            payload_json=json.dumps({"session_id": session.id}),
+                            status="pending",
+                        )
+                        db.add(job)
+                        if session.user and session.user.delete_data_on_session_end:
+                            for segment in list(session.transcript_segments):
+                                await db.delete(segment)
+                            for output in list(session.ai_outputs):
+                                await db.delete(output)
                         await db.commit()
                         await emit(websocket, "session.ended", session_id, {"status": "completed"})
                         break
+                    if action == "mark_question" and last_partial_question:
+                        await process_final_question(last_partial_question, forced=True)
                     continue
 
                 if message.get("type") == "transcript":
@@ -267,6 +320,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                         await persist_and_emit_transcript(websocket, db, session_id, result)
                         await process_final_question(text)
                     else:
+                        last_partial_question = text
                         await emit(
                             websocket,
                             "transcript.partial",

@@ -12,14 +12,27 @@ from sqlalchemy import text
 
 from app.api.auth_routes import router as auth_router
 from app.api.documents import router as documents_router
+from app.api.practice import router as practice_router
+from app.api.presets import router as presets_router
 from app.api.sessions import router as sessions_router
 from app.config import settings
 from app.database import engine
 from app.logging_config import configure_logging, logger
 from app.models import Base
 from app.realtime.ws import router as ws_router
+from app.services.seed import seed_practice_questions
 
 limiter = Limiter(key_func=get_remote_address)
+
+
+async def run_sqlite_migrations() -> None:
+    if not settings.database_url.startswith("sqlite"):
+        return
+    async with engine.begin() as conn:
+        result = await conn.execute(text("PRAGMA table_info(sessions)"))
+        columns = {row[1] for row in result.fetchall()}
+        if "strategy" not in columns:
+            await conn.execute(text("ALTER TABLE sessions ADD COLUMN strategy VARCHAR(32) DEFAULT 'live_answer'"))
 
 
 @asynccontextmanager
@@ -28,6 +41,8 @@ async def lifespan(app: FastAPI):
     os.makedirs(settings.upload_dir, exist_ok=True)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await run_sqlite_migrations()
+    await seed_practice_questions()
     logger.info("api_started", mock_ai=settings.use_mock_ai)
     yield
     await engine.dispose()
@@ -49,6 +64,8 @@ app.add_middleware(
 app.include_router(auth_router, prefix="/api")
 app.include_router(sessions_router, prefix="/api")
 app.include_router(documents_router, prefix="/api")
+app.include_router(presets_router, prefix="/api")
+app.include_router(practice_router, prefix="/api")
 app.include_router(ws_router)
 
 

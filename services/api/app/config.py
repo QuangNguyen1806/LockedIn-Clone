@@ -4,6 +4,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 API_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = API_ROOT / "lockedin.db"
+DEFAULT_UPLOAD_DIR = API_ROOT / "storage" / "uploads"
+
+
+def resolve_storage_path(stored_path: str) -> Path:
+    path = Path(stored_path)
+    if path.is_absolute():
+        return path
+    return (API_ROOT / path).resolve()
 
 
 class Settings(BaseSettings):
@@ -32,7 +40,7 @@ class Settings(BaseSettings):
     stt_provider: str = "auto"
     deepgram_api_key: str = ""
     use_mock_ai: bool = True
-    upload_dir: str = "./storage/uploads"
+    upload_dir: str = str(DEFAULT_UPLOAD_DIR)
     max_upload_mb: int = 10
     redis_url: str = "redis://localhost:6379/0"
     log_level: str = "INFO"

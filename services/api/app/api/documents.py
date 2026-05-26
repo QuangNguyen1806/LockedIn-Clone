@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
+from app.config import resolve_storage_path, settings
 from app.deps import get_current_user
 from app.database import get_db
 from app.models import Document, JobQueue, User
@@ -66,12 +66,40 @@ async def upload_document(
         user_id=user.id,
         kind=kind,
         filename=file.filename or storage_name,
-        storage_path=str(storage_path),
+        storage_path=str(storage_path.resolve()),
         parse_status="pending",
     )
     db.add(doc)
     await db.flush()
 
+    job = JobQueue(
+        job_type="parse_document",
+        payload_json=json.dumps({"document_id": doc.id}),
+        status="pending",
+    )
+    db.add(job)
+    await db.commit()
+    await db.refresh(doc)
+    return doc_to_response(doc)
+
+
+@router.post("/{document_id}/reparse", response_model=DocumentResponse)
+async def reparse_document(
+    document_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Document).where(Document.id == document_id, Document.user_id == user.id)
+    )
+    doc = result.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if not resolve_storage_path(doc.storage_path).exists():
+        raise HTTPException(status_code=400, detail="Stored file is missing. Upload the document again.")
+
+    doc.parse_status = "pending"
+    doc.parsed_text = None
     job = JobQueue(
         job_type="parse_document",
         payload_json=json.dumps({"document_id": doc.id}),
@@ -97,7 +125,7 @@ async def delete_document(
         raise HTTPException(status_code=404, detail="Document not found")
 
     if os.path.exists(doc.storage_path):
-        os.remove(doc.storage_path)
+        os.remove(resolve_storage_path(doc.storage_path))
     await db.delete(doc)
     await db.commit()
     return {"ok": True}

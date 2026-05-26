@@ -21,6 +21,22 @@
         "transparent": false,
         "alwaysOnTop": false,
         "center": true
+      },
+      {
+        "label": "overlay",
+        "title": "LockedIn Overlay",
+        "url": "/overlay",
+        "width": 440,
+        "height": 240,
+        "resizable": true,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false,
+        "center": false,
+        "x": 24,
+        "y": 24
       }
     ],
     "security": {
